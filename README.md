@@ -1,6 +1,6 @@
-# letterboxd-mcp
+# personal-letterboxd-mcp
 
-A personal [MCP](https://modelcontextprotocol.io) server on Cloudflare Workers that gives Claude
+A personal, single-user [MCP](https://modelcontextprotocol.io) server on Cloudflare Workers that gives Claude
 (claude.ai, the apps, and Claude Code) access to your Letterboxd history, so film recommendations
 are based on what you've actually watched and what you wrote about it.
 

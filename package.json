@@ -1,9 +1,9 @@
 {
-  "name": "letterboxd-mcp",
+  "name": "personal-letterboxd-mcp",
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "Read-only remote MCP server exposing a Letterboxd data export to Claude",
+  "description": "Personal MCP server and private page that give Claude your Letterboxd history and taste memory",
   "scripts": {
     "test": "vitest run",
     "typecheck": "tsc --noEmit",

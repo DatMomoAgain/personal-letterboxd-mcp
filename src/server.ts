@@ -14,7 +14,7 @@ import type { Dataset } from "./types.ts";
 
 export const NO_DATA_MESSAGE =
   "No Letterboxd data has been uploaded yet. The user can upload their export ZIP on their personal page " +
-  '(or run "npm run upload -- <export zip>" in ~/Code/letterboxd-mcp).';
+  '(or run "npm run upload -- <export zip>" in the project folder).';
 
 export const INSTRUCTIONS = [
   "The user's Letterboxd history (read-only, from their data export; data is as of uploadedAt) " +
