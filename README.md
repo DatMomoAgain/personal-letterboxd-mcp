@@ -30,6 +30,8 @@ passwords.
 ## Setup
 
 Requires Node 22+ and a Cloudflare account (the free plan is plenty).
+For posters, also a free [TMDB](https://www.themoviedb.org/settings/api) account: use its
+**API Read Access Token** (not the shorter API Key). Without it everything works, just without posters.
 
 ```sh
 npm install
