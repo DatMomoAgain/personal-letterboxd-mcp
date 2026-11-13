@@ -1,0 +1,17 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "letterboxd-mcp",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-11-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  // Only the one workers.dev address; no per-version preview URLs.
+  "preview_urls": false,
+  "kv_namespaces": [
+    {
+      "binding": "LETTERBOXD",
+      // Created with `wrangler kv namespace create LETTERBOXD` on 2026-11-14.
+      "id": "4d65696bdb77416d9cb94023ea1299fa"
+    }
+  ]
+}

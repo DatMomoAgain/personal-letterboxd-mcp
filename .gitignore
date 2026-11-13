@@ -1,0 +1,7 @@
+node_modules
+.wrangler
+.connector-url
+.page-url
+.dev.vars
+dist
+.superpowers
