@@ -20,7 +20,9 @@ export interface FilmRef {
   imdbId?: string;
 }
 
-export const filmKey = (f: FilmRef) => `${f.title.trim().toLowerCase()}|${f.year ?? ""}`;
+/** Cache key: the IMDb id when known (so a corrected id gets a fresh lookup), else "title|year". */
+export const filmKey = (f: FilmRef) =>
+  f.imdbId && /^tt\d{5,10}$/.test(f.imdbId) ? f.imdbId : `${f.title.trim().toLowerCase()}|${f.year ?? ""}`;
 
 export function posterUrl(path: string, width: 92 | 185 | 342 | 500): string {
   return `https://image.tmdb.org/t/p/w${width}${path}`;

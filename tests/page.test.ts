@@ -64,6 +64,24 @@ describe("renderPage", () => {
     expect(html.match(/class="thumb"/g)).toHaveLength(2);
   });
 
+  it("hides a pick watched under a year one off, and links picks with an id to their Letterboxd page", () => {
+    const memory: Memory = {
+      ...emptyMemory(),
+      picks: {
+        updatedAt: "2026-11-14T00:00:00Z",
+        items: [
+          { title: "Heat", year: 1996, why: "seen, Letterboxd says 1995" },
+          { title: "Ran", year: 1985, imdbId: "tt0089881", why: "epic battles" },
+          { title: "Old pick", year: 2000, why: "saved before ids" },
+        ],
+      },
+    };
+    const html = render(fixture(), memory);
+    expect(html).not.toContain("seen, Letterboxd says 1995");
+    expect(html).toContain('href="https://letterboxd.com/imdb/tt0089881/"');
+    expect(html).toContain('href="https://letterboxd.com/search/films/Old%20pick/"');
+  });
+
   it("all picks watched → friendly empty state", () => {
     const memory: Memory = { ...emptyMemory(), picks: { updatedAt: "2026-11-14", items: [{ title: "Heat", year: 1995, why: "x" }] } };
     expect(render(fixture(), memory)).toContain("You've watched everything Claude picked");

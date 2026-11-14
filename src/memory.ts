@@ -15,6 +15,8 @@ export type Topic = keyof typeof TOPICS;
 export interface Example {
   title: string;
   year: number | null;
+  /** Which title this is, so its poster is exact (series especially). Optional. */
+  imdbId?: string;
   verdict?: "liked" | "disliked" | "mixed";
   /** A few words on why, e.g. "beautiful, weak characters". */
   why?: string;

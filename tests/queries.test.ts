@@ -137,6 +137,14 @@ describe("hasSeen", () => {
     expect(only2018.matches[0]).toMatchObject({ year: 2018, rating: 3 });
   });
 
+  it("has_seen accepts a year one off either way, closest year first", () => {
+    expect(hasSeen(fixture(), "Se7en", 1996)).toMatchObject({ exactMatch: true, matches: [{ year: 1995 }] });
+    expect(hasSeen(fixture(), "Se7en", 1994).exactMatch).toBe(true);
+    expect(hasSeen(fixture(), "Se7en", 1997)).toMatchObject({ exactMatch: false, matches: [] });
+    // Both Suspirias are far apart, so a year still picks one.
+    expect(hasSeen(fixture(), "Suspiria", 2019).matches.map((m) => m.year)).toEqual([2018]);
+  });
+
   it("has_seen watched but unrated", () => {
     expect(hasSeen(fixture(), "Heat").matches[0]).toMatchObject({
       watched: true,

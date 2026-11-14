@@ -31,6 +31,8 @@ export const INSTRUCTIONS = [
     "notes with update_note or forget. When you recommend films, save the list with save_picks (it appears on " +
     "the user's personal page). save_picks needs each film's IMDb id: get them with find_film (one call for the " +
     "whole list), never from memory, and read save_picks's reply to check each id matched the film you meant. " +
+    "Note examples take an optional imdbId too (also from find_film); always give one for a series, or the " +
+    "page may show a same-named film's poster. " +
     "When your understanding of their taste meaningfully changes, rewrite " +
     "the overview with save_overview (written to them, in second person).",
   "",
@@ -69,6 +71,11 @@ const noteFields = {
       z.object({
         title: z.string().trim().min(1).max(300),
         year: year.optional().describe("Release year"),
+        imdbId: z
+          .string()
+          .regex(IMDB_ID, 'An IMDb id like "tt1663202"')
+          .optional()
+          .describe("IMDb id from find_film, so the page shows the right poster. Always include it for series."),
         verdict: z.enum(["liked", "disliked", "mixed"]).optional().describe("How it landed with the user"),
         why: z.string().trim().min(1).max(120).optional().describe('A few words, e.g. "beautiful, weak characters"'),
       }),
@@ -81,7 +88,7 @@ const noteFields = {
 const fields = (f: {
   title?: string | null;
   topic?: Topic | null;
-  examples?: { title: string; year?: number; verdict?: "liked" | "disliked" | "mixed"; why?: string }[] | null;
+  examples?: { title: string; year?: number; imdbId?: string; verdict?: "liked" | "disliked" | "mixed"; why?: string }[] | null;
 }): NoteFields => ({
   title: f.title,
   topic: f.topic,

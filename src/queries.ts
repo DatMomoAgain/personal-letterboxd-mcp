@@ -238,8 +238,15 @@ export function hasSeen(d: Dataset, title: string, year?: number): SeenResult {
   const films = [...allFilms(d).values()];
   const exact = films.filter((f) => normalizeTitle(f.name) === q);
   let candidates = matchTitle(films, title);
-  if (year !== undefined) candidates = candidates.filter((f) => f.year === year);
-  return { query: title, exactMatch: exact.length > 0 && candidates.length > 0, matches: candidates.sort(byName) };
+  // Release years differ by one between sources (festival vs. wide release, TMDB vs. Letterboxd),
+  // so a year within one either way counts; the closest year sorts first.
+  const off = (f: SeenMatch) => (year === undefined || f.year === null ? 0 : Math.abs(f.year - year));
+  if (year !== undefined) candidates = candidates.filter((f) => f.year !== null && off(f) <= 1);
+  return {
+    query: title,
+    exactMatch: exact.length > 0 && candidates.length > 0,
+    matches: candidates.sort((a, b) => off(a) - off(b) || byName(a, b)),
+  };
 }
 
 // ---------- taste summary ----------

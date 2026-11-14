@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { emptyMemory } from "../src/memory.ts";
-import { renderPage } from "../src/page.ts";
+import { exampleFilms, renderPage } from "../src/page.ts";
 import { filmKey, MAX_LOOKUPS_PER_VIEW, type PosterCache, resolvePosters } from "../src/posters.ts";
 import { fixture } from "./fixture.ts";
 
@@ -97,6 +97,30 @@ describe("resolvePosters", () => {
 
 describe("posters on the page", () => {
   const opts = { uploadAction: "/u", status: null, now: NOW };
+
+  it("looks taste examples with an IMDb id up by that id, and keys their poster by it", () => {
+    const memory = {
+      ...emptyMemory(),
+      notes: [
+        {
+          id: "n1",
+          text: "x",
+          examples: [
+            { title: "Barry", year: 2018, imdbId: "tt5348176" },
+            { title: "Heat", year: 1995 },
+          ],
+          createdAt: "",
+          updatedAt: "",
+        },
+      ],
+    };
+    const shown = exampleFilms(memory);
+    expect(shown.map(filmKey)).toEqual(["tt5348176", "heat|1995"]);
+    const posters = new Map([["tt5348176", "/barry.jpg"], ["barry|2018", "/wrong.jpg"]]);
+    const html = renderPage(fixture(), memory, { ...opts, posters });
+    expect(html).toContain("/barry.jpg");
+    expect(html).not.toContain("/wrong.jpg");
+  });
 
   it("shows TMDB images, placeholders for films without one, nothing without posters", () => {
     const d = fixture();

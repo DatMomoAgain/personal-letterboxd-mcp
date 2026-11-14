@@ -63,6 +63,8 @@ const paragraphs = (text: string) =>
 
 const EXT = 'rel="noreferrer noopener" target="_blank"';
 const letterboxdSearch = (title: string) => `https://letterboxd.com/search/films/${encodeURIComponent(title)}/`;
+/** Letterboxd redirects this to the film's own page. */
+const letterboxdByImdb = (imdbId: string) => `https://letterboxd.com/imdb/${encodeURIComponent(imdbId)}/`;
 
 type Stamp = (iso: string) => string;
 type PosterSize = 92 | 185 | 342;
@@ -142,7 +144,7 @@ function watchView(data: Dataset | null, memory: Memory, at: Stamp, posters?: Po
           <p class="pick-meta">${p.year ?? ""}${p.onWatchlist ? ' <span class="badge">on your watchlist</span>' : ""}</p>
           ${scores(ratings, p)}
           <p class="why">${esc(p.why)}</p>
-          <a class="btn" href="${esc(letterboxdSearch(p.title))}" ${EXT}>Open on Letterboxd</a>
+          <a class="btn" href="${esc(p.imdbId ? letterboxdByImdb(p.imdbId) : letterboxdSearch(p.title))}" ${EXT}>Open on Letterboxd</a>
         </div>
       </article>`;
     })
@@ -281,7 +283,7 @@ const VERDICTS = { liked: "Liked", disliked: "Didn't work", mixed: "Mixed" } as 
 function exampleChip(data: Dataset | null, e: Example, posters?: Posters): string {
   const seen = data ? hasSeen(data, e.title, e.year ?? undefined) : null;
   const film = seen?.exactMatch ? seen.matches[0] : undefined;
-  const ref = { title: e.title, year: e.year ?? film?.year ?? null };
+  const ref = exampleRef(e, film?.year);
   const verdict = e.verdict ?? (film?.rating != null ? (film.rating >= 3 ? "liked" : film.rating <= 2 ? "disliked" : "mixed") : undefined);
   const rating = film?.rating != null ? `<span class="stars">${stars(film.rating)}</span>` : "";
   const label = [rating, verdict && !rating ? VERDICTS[verdict] : "", e.why ? esc(e.why) : ""].filter(Boolean).join(" · ");
@@ -313,7 +315,12 @@ function groupNotes(notes: Note[]): { id: string; label: string; notes: Note[] }
 
 /** Example films on the Taste view, so their posters get looked up too. */
 export function exampleFilms(memory: Memory): FilmRef[] {
-  return memory.notes.flatMap((n) => (n.examples ?? []).map((e) => ({ title: e.title, year: e.year ?? null })));
+  return memory.notes.flatMap((n) => (n.examples ?? []).map((e) => exampleRef(e)));
+}
+
+/** The poster lookup for an example: by IMDb id when Claude gave one, else by title and year. */
+function exampleRef(e: Example, watchedYear?: number | null): FilmRef {
+  return { title: e.title, year: e.year ?? watchedYear ?? null, ...(e.imdbId && { imdbId: e.imdbId }) };
 }
 
 function tasteView(data: Dataset | null, memory: Memory, at: Stamp, posters?: Posters): string {
