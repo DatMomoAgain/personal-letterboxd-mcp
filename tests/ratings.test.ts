@@ -59,6 +59,19 @@ describe("resolveRatings", () => {
     expect(r.ratings.get(filmKey(film))?.rt).toBe("99%");
   });
 
+  it("tries a year either side when the exact year isn't found", async () => {
+    const omdb = fakeOmdb({});
+    const byYear = (async (input: RequestInfo | URL) => {
+      omdb.calls.push(new URL(String(input)));
+      const y = new URL(String(input)).searchParams.get("y");
+      return Response.json(y === "2012" ? found("tt1772925", "7.8", "99%", "77") : { Response: "False", Error: "Movie not found!" });
+    }) as typeof fetch;
+    const film = { title: "Jiro Dreams of Sushi", year: 2011 };
+    const r = await resolveRatings([film], {}, "k", NOW, byYear);
+    expect(omdb.calls.map((u) => u.searchParams.get("y"))).toEqual(["2011", "2012"]);
+    expect(r.ratings.get(filmKey(film))?.imdb).toBe("7.8");
+  });
+
   it("refreshes after 30 days, and never caches failures like a bad key or the daily limit", async () => {
     const film = { title: "Mother", year: 2009 };
     const cache: RatingsCache = { [filmKey(film)]: { imdbId: "tt1216496", imdb: "7.7", checked: "2026-10-01T00:00:00Z" } };
@@ -75,7 +88,8 @@ describe("resolveRatings", () => {
     const many = Array.from({ length: 20 }, (_, i) => ({ title: `F${i}`, year: 2000 }));
     const omdb = fakeOmdb({});
     await resolveRatings(many, {}, "k", NOW, omdb.fetcher);
-    expect(omdb.calls).toHaveLength(MAX_RATING_LOOKUPS_PER_VIEW);
+    // Each unknown film tries its year, then a year either side.
+    expect(omdb.calls).toHaveLength(MAX_RATING_LOOKUPS_PER_VIEW * 3);
 
     const evil = fakeOmdb({
       X: { Response: "True", imdbID: "tt1234567", imdbRating: '"><script>', Ratings: [{ Source: "Rotten Tomatoes", Value: "<b>" }] },

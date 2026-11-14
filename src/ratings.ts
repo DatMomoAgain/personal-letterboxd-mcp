@@ -4,8 +4,11 @@
 import { type FilmRef, filmKey } from "./posters.ts";
 
 export const RATINGS_KEY = "ratings";
-/** OMDb films looked up per page view (each may take 2 requests; Workers Free allows 50 subrequests). */
-export const MAX_RATING_LOOKUPS_PER_VIEW = 8;
+/**
+ * OMDb films looked up per page view. Each takes up to 4 requests, and Workers Free allows
+ * 50 subrequests per view, shared with up to 30 TMDB poster lookups.
+ */
+export const MAX_RATING_LOOKUPS_PER_VIEW = 5;
 /** Re-check scores, and films OMDb didn't know, after this long. */
 const REFRESH_MS = 30 * 86_400_000;
 
@@ -55,11 +58,20 @@ async function fetchOmdb(title: string, year: number | null, key: string, fetche
   throw new Error(`OMDb ${res.status}: ${String(body.Error ?? "no error message").slice(0, 100)}`);
 }
 
-/** Tries the title as given, then without accents (OMDb has "Shogun", not "Shōgun"). */
+/**
+ * Tries the title as given, then without accents (OMDb has "Shogun", not "Shōgun"), then a
+ * year either side (festival premiere vs release year: Letterboxd says 2011, OMDb 2012).
+ */
 async function lookup(f: FilmRef, key: string, fetcher: typeof fetch): Promise<Scores | null> {
-  const found = await fetchOmdb(f.title, f.year, key, fetcher);
-  const plain = stripAccents(f.title);
-  return found ?? (plain !== f.title ? fetchOmdb(plain, f.year, key, fetcher) : null);
+  const title = stripAccents(f.title) === f.title ? f.title : null;
+  const attempts: [string, number | null][] = [[f.title, f.year]];
+  if (!title) attempts.push([stripAccents(f.title), f.year]);
+  if (f.year) attempts.push([title ?? stripAccents(f.title), f.year + 1], [title ?? stripAccents(f.title), f.year - 1]);
+  for (const [t, y] of attempts) {
+    const found = await fetchOmdb(t, y, key, fetcher);
+    if (found) return found;
+  }
+  return null;
 }
 
 /**
