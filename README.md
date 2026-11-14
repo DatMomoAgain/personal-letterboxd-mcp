@@ -6,6 +6,18 @@ are based on what you've actually watched and what you wrote about it.
 
 It works from Letterboxd's official data export, not scraping and not your password.
 
+## What it looks like
+
+The private page, with my own data:
+
+![Watch next: Claude's picks on a poster stage with IMDb, Rotten Tomatoes and Metacritic scores](docs/screenshots/watch-next.png)
+
+![Films: a poster wall of everything watched, with search, filters and sorting](docs/screenshots/films.png)
+
+![Taste: Claude's overview, then its notes grouped by topic with example films](docs/screenshots/taste.png)
+
+<img src="docs/screenshots/phone.png" alt="Watch next on a phone" width="300">
+
 ## What it does
 
 **For Claude (MCP tools)**
@@ -13,14 +25,21 @@ It works from Letterboxd's official data export, not scraping and not your passw
   text attached wherever a film appears.
 - Taste memory: Claude saves what it learns about your taste (`remember`, `update_note`, `forget`)
   in your own Cloudflare KV, not in Claude's memory, and reads it first in every chat.
-- Saves its recommendations and a written overview of your taste for the personal page.
+- Saves its recommendations and a written overview of your taste for the personal page. Each
+  saved pick carries an IMDb id, which Claude gets from `find_film` (a TMDB search) and the server
+  checks on save, so scores always belong to the right film.
 
 **For you (a private web page)**
-- Claude's "watch next" picks (they disappear once you've watched them), with IMDb, Rotten Tomatoes
-  and Metacritic scores linking to each site, plus its taste overview and
-  notes, your paginated diary with reviews and TMDB posters, and stats.
-- An upload form for a new Letterboxd export ZIP, so it works from any device.
-- Server-rendered HTML, no JavaScript, strict CSP, no-referrer, noindex.
+- **Watch next:** Claude's picks one at a time on a poster stage (they disappear once you've watched
+  them), with IMDb, Rotten Tomatoes and Metacritic scores linking to each site.
+- **Films:** a poster wall of everything you've watched, with search, filters (liked, reviewed, rating,
+  decade) and sorting. Selecting a film shows your rating, watch dates and review.
+- **Taste:** Claude's overview, then its notes about you grouped by topic. Each note is a theme with a
+  headline, the detail, and example films showing your rating and how each landed. Rating and decade
+  charts jump to the matching films.
+- An upload dialog for a new Letterboxd export ZIP, so it works from any device.
+- Server-rendered HTML with one small inline script (per-request CSP nonce, no network access, no
+  third-party code), no-referrer, noindex. Without JavaScript it's one long readable page.
 
 ## How access works
 
@@ -59,8 +78,11 @@ npx tsc --noEmit   # type check
 ```
 
 Code lives in `src/`: `index.ts` (routing and auth), `server.ts` (MCP tools and instructions),
-`queries.ts` (reading the export), `memory.ts` (taste memory), `page.ts` (the personal page),
-`posters.ts` (TMDB lookups, cached in KV), `ratings.ts` (OMDb scores, cached in KV), `exportZip.ts` / `dataset.ts` (parsing the export).
+`queries.ts` (reading the export), `memory.ts` (taste memory), `page.ts` (the personal page's HTML and
+CSS), `pageScript.ts` (its inline script), `posters.ts` (TMDB lookups, cached in KV), `ratings.ts`
+(OMDb scores, cached in KV), `exportZip.ts` / `dataset.ts` (parsing the export).
 
 Poster images are provided by [TMDB](https://www.themoviedb.org). This product uses the TMDB API
-but is not endorsed or certified by TMDB.
+but is not endorsed or certified by TMDB. The display font is
+[Big Shoulders](https://github.com/xotypeco/big_shoulders) (SIL Open Font License, see `src/fonts/LICENSE`),
+bundled into the Worker and served under the secret path.

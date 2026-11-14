@@ -39,7 +39,7 @@ describe("renderPage", () => {
       picks: { items: [{ title: '"><script>', year: null, why: "<i>why</i>" }], updatedAt: "2026-11-14T00:00:00Z" },
     };
     const html = render(d, memory);
-    expect(html).not.toMatch(/<script>|<img|<b>bold|<i>why/);
+    expect(html).not.toMatch(/<script|<img src=x|<b>bold|<i>why/);
     expect(html).toContain("&lt;script&gt;alert(1)&lt;/script&gt; &amp; &quot;quotes&quot;");
   });
 
@@ -57,9 +57,11 @@ describe("renderPage", () => {
     };
     const html = render(fixture(), memory);
     expect(html).not.toContain("already seen");
-    expect(html).toMatch(/The Wailing<\/a>.*on your watchlist/s);
+    expect(html).toMatch(/<h2>The Wailing<\/h2>\s*<p class="pick-meta">2016 <span class="badge">on your watchlist/);
     expect(html).toContain("epic battles");
-    expect(html).toContain("picked by Claude · Nov 14");
+    expect(html).toContain("2 picks from Claude, Nov 14");
+    // One strip button per pick shown.
+    expect(html.match(/class="thumb"/g)).toHaveLength(2);
   });
 
   it("all picks watched → friendly empty state", () => {
@@ -67,10 +69,16 @@ describe("renderPage", () => {
     expect(render(fixture(), memory)).toContain("You've watched everything Claude picked");
   });
 
-  it("recent diary with stars, rewatch badge and review", () => {
+  it("films wall: every watched film, newest first, with rating, watch dates and review", () => {
     const html = render(fixture());
-    expect(html).toContain("Recently watched");
-    expect(html).toMatch(/Paddington 2<\/a>.*★★★★★.*rewatch.*Perfect\./s);
+    expect(html.match(/<a class="film"/g)).toHaveLength(7);
+    const order = [...html.matchAll(/data-t="([^"]*)"/g)].map((m) => m[1]);
+    // Diary dates beat the day a film was marked watched; Heat is watched but unrated.
+    expect(order.slice(0, 3)).toEqual(["cats", "paddington2", "se7en"]);
+    expect(order).toContain("amelie"); // accents folded for search
+    expect(html).toMatch(/data-t="heat" data-r="" data-y="1995" data-l="1" data-v="0"/);
+    expect(html).toMatch(/<h3>Paddington 2<\/h3>.*★★★★★.*Watched Oct 5, 2025.*Perfect\./s);
+    expect(html).toContain("Not rated");
   });
 
   it("nudges when data is stale, and explains how to start when there is none", () => {
@@ -80,7 +88,7 @@ describe("renderPage", () => {
     expect(render(fixture())).not.toContain("days old");
     const empty = render(null);
     expect(empty).toContain("No data yet");
-    expect(empty).not.toContain("Recently watched");
+    expect(empty).not.toContain('id="films"');
   });
 
   it("rating bars run 0.5 → 5 and timestamps use the viewer's timezone", () => {
@@ -104,34 +112,61 @@ describe("renderPage", () => {
     expect(render(null)).not.toContain("My Letterboxd");
   });
 
-  it("puts Your taste above Recently watched", () => {
+  it("has three views in order, each reachable from the nav", () => {
     const html = render(fixture());
-    expect(html.indexOf("Your taste")).toBeLessThan(html.indexOf("Recently watched"));
+    const at = (id: string) => html.indexOf(`<section class="view" id="${id}"`);
+    expect(at("watch")).toBeGreaterThan(-1);
+    expect(at("watch")).toBeLessThan(at("films"));
+    expect(at("films")).toBeLessThan(at("taste"));
+    for (const id of ["watch", "films", "taste"]) expect(html).toContain(`<a href="#${id}">`);
   });
 
-  it("pages through the whole diary, clamping out-of-range pages", () => {
-    const d = fixture();
-    const base = d.diary[0];
-    // Film 1 is the newest.
-    d.diary = Array.from({ length: 40 }, (_, i) => {
-      const date = new Date(Date.UTC(2026, 0, 1) + (40 - i) * 86_400_000).toISOString().slice(0, 10);
-      return { ...base, name: `Film ${i + 1}`, uri: `https://boxd.it/f${i + 1}`, date, watchedDate: date };
-    });
-    const at = (diaryPage: number) =>
-      renderPage(d, emptyMemory(), { uploadAction: "/u", status: null, now: NOW, diaryPage });
-    const p1 = at(1);
-    expect(p1).toContain("Page 1 of 3");
-    expect(p1).toContain(">Film 1<");
-    expect(p1).not.toContain(">Film 16<");
-    expect(p1).toContain('href="?page=2#diary"');
-    expect(p1).toContain('<span class="pg off">← Newer</span>');
-    const p3 = at(3);
-    expect(p3).toContain("Page 3 of 3");
-    expect(p3).toContain(">Film 40<");
-    expect(p3).toContain('<span class="pg off">Older →</span>');
-    expect(at(99)).toContain("Page 3 of 3");
-    expect(at(-5)).toContain("Page 1 of 3");
-    expect(render(fixture())).not.toContain("Page 1 of"); // one page → no pager
+  it("groups notes by topic, with title, detail and example films", () => {
+    const note = (id: string, text: string, extra = {}) => ({ id, text, createdAt: "", updatedAt: "", ...extra });
+    const memory: Memory = {
+      ...emptyMemory(),
+      notes: [
+        note("n1", "2.5 stars means average for me. Three and up means I liked it."),
+        note("n2", "Needs a person at the centre.", {
+          title: "Documentaries",
+          topic: "formats",
+          examples: [
+            { title: "Se7en", year: 1995, why: "<tense>" },
+            { title: "Cats", year: 2019 },
+            { title: "Unknown Doc", year: null, verdict: "mixed" },
+          ],
+        }),
+        note("n3", "Characters first.", { title: "Craft", topic: "loves" }),
+      ],
+    };
+    const html = render(fixture(), memory);
+    // Topic order follows TOPICS; untitled, topicless notes go last and are split at the first sentence.
+    const order = ["t-loves", "t-formats", "t-other"].map((id) => html.indexOf(`id="${id}"`));
+    expect(order).toEqual([...order].sort((a, b) => a - b));
+    expect(order[0]).toBeGreaterThan(-1);
+    expect(html).toContain('<a href="#t-formats">Genres and formats <span class="num">1</span></a>');
+    expect(html).toContain("<h4>2.5 stars means average for me.</h4>\n    <p>Three and up means I liked it.</p>");
+    expect(html).toContain("<h4>Documentaries</h4>\n    <p>Needs a person at the centre.</p>");
+    // The user's own rating decides the verdict when Claude didn't give one; links go to their Letterboxd entry.
+    expect(html).toMatch(/<li class="ex liked">\s*<a href="https:\/\/boxd.it\/s7"[^]*?★★★★<\/span> · &lt;tense&gt;/);
+    expect(html).toMatch(/<li class="ex disliked">[^]*?Cats/);
+    expect(html).toMatch(/<li class="ex mixed">[^]*?Unknown Doc<\/span><span class="ex-note">Mixed</);
+  });
+
+  it("rating and decade charts link to the matching films", () => {
+    const html = render(fixture());
+    expect(html).toContain('data-jump-rating="4"');
+    expect(html).toContain('data-jump-rating="" disabled'); // nothing rated 0.5
+    expect(html).toContain('data-jump-decade="1990"');
+    expect(html).toContain('<option value="1990">1990s</option>');
+  });
+
+  it("includes the script only with a nonce, and the font only with a font address", () => {
+    const opts = { uploadAction: "/u", status: null, now: NOW };
+    expect(render(fixture())).not.toMatch(/<script|@font-face/);
+    const html = renderPage(fixture(), emptyMemory(), { ...opts, nonce: "abc", fontBase: "/home/t" });
+    expect(html).toContain('<script nonce="abc">');
+    expect(html).toContain('url("/home/t/font-latin.woff2")');
   });
 
   it("shows the upload result", () => {
@@ -145,10 +180,26 @@ describe("page routes", () => {
     expect(res.status).toBe(200);
     expect(res.headers.get("referrer-policy")).toBe("no-referrer");
     expect(res.headers.get("cache-control")).toBe("no-store");
-    expect(res.headers.get("content-security-policy")).toContain("default-src 'none'");
+    const csp = res.headers.get("content-security-policy")!;
+    expect(csp).toContain("default-src 'none'");
     const html = await res.text();
     expect(html).toContain("DatMomoAgain");
     expect(html).toContain(`action="/home/${TOKEN}/upload"`);
+    // Only the page's own script may run: its nonce matches the header and changes per request.
+    const nonce = /<script nonce="([^"]+)">/.exec(html)![1];
+    expect(csp).toContain(`script-src 'nonce-${nonce}'`);
+    expect(csp).not.toMatch(/connect-src|unsafe-eval|script-src[^;]*(https:|\*|'self')/);
+    const again = await (await worker.fetch(new Request(HOME), env(fakeKv(fixture())))).text();
+    expect(again).not.toContain(nonce);
+  });
+
+  it("serves the font only under the secret path", async () => {
+    const res = await worker.fetch(new Request(`${HOME}/font-latin.woff2`), env(fakeKv(null)));
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe("font/woff2");
+    const wrong = `${ORIGIN}/home/${"b".repeat(64)}/font-latin.woff2`;
+    expect((await worker.fetch(new Request(wrong), env(fakeKv(null)))).status).toBe(404);
+    expect((await worker.fetch(new Request(`${HOME}/other.woff2`), env(fakeKv(null)))).status).toBe(404);
   });
 
   it("POST to the page itself, or GET to upload, is 405", async () => {

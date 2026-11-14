@@ -6,3 +6,9 @@ interface Env {
   /** OMDb API key, for IMDb / Rotten Tomatoes / Metacritic scores on picks. `wrangler secret put OMDB_KEY` */
   OMDB_KEY?: string;
 }
+
+// Font files are bundled as binary data (see "rules" in wrangler.jsonc).
+declare module "*.woff2" {
+  const data: ArrayBuffer;
+  export default data;
+}

@@ -76,12 +76,14 @@ describe("posters on the page", () => {
     const first = d.diary.find((e) => e.name === "Paddington 2")!;
     const posters = new Map([[filmKey({ title: first.name, year: first.year }), "/p2.jpg"]]);
     const html = renderPage(d, emptyMemory(), { ...opts, posters });
-    expect(html).toContain('src="https://image.tmdb.org/t/p/w92/p2.jpg"');
-    expect(html).toContain('srcset="https://image.tmdb.org/t/p/w185/p2.jpg 2x"');
-    expect(html).toContain('class="poster none"');
+    expect(html).toContain('src="https://image.tmdb.org/t/p/w185/p2.jpg"');
+    expect(html).toContain('srcset="https://image.tmdb.org/t/p/w342/p2.jpg 2x"');
+    expect(html).toContain('<span class="poster none">Se7en</span>');
+    expect(html).toContain("Posters from TMDB");
+    // Without posters at all, every film is a title tile and TMDB isn't mentioned.
     const plain = renderPage(d, emptyMemory(), opts);
-    expect(plain).not.toContain('class="poster');
-    expect(plain).not.toContain('class="diary with-posters"');
-    expect(html).toContain('class="diary with-posters"');
+    expect(plain).not.toContain("<img");
+    expect(plain).toContain('<span class="poster none">Paddington 2</span>');
+    expect(plain).not.toContain("TMDB");
   });
 });

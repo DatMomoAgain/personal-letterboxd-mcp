@@ -20,7 +20,7 @@ export interface FilmRef {
 
 export const filmKey = (f: FilmRef) => `${f.title.trim().toLowerCase()}|${f.year ?? ""}`;
 
-export function posterUrl(path: string, width: 92 | 185): string {
+export function posterUrl(path: string, width: 92 | 185 | 342 | 500): string {
   return `https://image.tmdb.org/t/p/w${width}${path}`;
 }
 

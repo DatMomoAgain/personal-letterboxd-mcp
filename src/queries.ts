@@ -210,6 +210,21 @@ function allFilms(d: Dataset): Map<string, SeenMatch> {
   return films;
 }
 
+export interface WatchedFilm extends SeenMatch {
+  /** Latest diary date, else the day it was marked watched or rated. "" if unknown. */
+  lastDate: string;
+}
+
+/** Every watched film (logged in the diary or not), most recently watched first. */
+export function getFilms(d: Dataset): WatchedFilm[] {
+  const marked = new Map<string, string>();
+  for (const f of [...d.ratings, ...d.watched]) marked.set(f.uri, f.date);
+  return [...allFilms(d).values()]
+    .filter((f) => f.watched)
+    .map((f) => ({ ...f, lastDate: f.diaryDates.at(-1) ?? marked.get(f.uri) ?? "" }))
+    .sort((a, b) => b.lastDate.localeCompare(a.lastDate) || byName(a, b));
+}
+
 export interface SeenResult {
   query: string;
   /** false when matches are partial title matches (or empty) — not proof the user saw this film. */

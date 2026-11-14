@@ -7,6 +7,8 @@
   "workers_dev": true,
   // Only the one workers.dev address; no per-version preview URLs.
   "preview_urls": false,
+  // The page's display font (src/fonts) is bundled into the Worker as binary data.
+  "rules": [{ "type": "Data", "globs": ["**/*.woff2"], "fallthrough": true }],
   "kv_namespaces": [
     {
       "binding": "LETTERBOXD",

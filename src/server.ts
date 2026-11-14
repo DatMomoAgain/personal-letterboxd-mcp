@@ -9,7 +9,8 @@ import {
   hasSeen,
   MAX_LIMIT,
 } from "./queries.ts";
-import { addNote, type MemoryStore, removeNote, updateNote } from "./memory.ts";
+import { addNote, type MemoryStore, type NoteFields, removeNote, TOPICS, type Topic, updateNote } from "./memory.ts";
+import { fetchOmdb, findFilm, IMDB_ID } from "./ratings.ts";
 import type { Dataset } from "./types.ts";
 
 export const NO_DATA_MESSAGE =
@@ -24,9 +25,13 @@ export const INSTRUCTIONS = [
     "It holds what the user told you about their taste in earlier chats. It is the user's chosen place " +
     "for this: store film-taste facts here with remember, NOT in your own built-in memory. " +
     "Whenever the user explains a preference, answers a question about their taste, or corrects you, " +
-    "save it with remember (one concise fact per note, close to their words). Fix stale notes with " +
-    "update_note or forget. When you recommend films, save the list with save_picks (it appears on " +
-    "the user's personal page). When your understanding of their taste meaningfully changes, rewrite " +
+    "save it with remember. Each note is one theme of their taste: a short title, a topic, the detail " +
+    "close to their words, and the films that show it (with whether they liked each). If a new fact belongs " +
+    "to an existing theme, extend that note with update_note instead of adding a near-duplicate. Fix stale " +
+    "notes with update_note or forget. When you recommend films, save the list with save_picks (it appears on " +
+    "the user's personal page). save_picks needs each film's IMDb id: get them with find_film (one call for the " +
+    "whole list), never from memory, and read save_picks's reply to check each id matched the film you meant. " +
+    "When your understanding of their taste meaningfully changes, rewrite " +
     "the overview with save_overview (written to them, in second person).",
   "",
   "Then use get_taste_summary for recommendations, and has_seen before recommending a film.",
@@ -52,15 +57,56 @@ const paging = {
   offset: z.number().int().min(0).optional().describe("Items to skip, for paging"),
 };
 
-const readOnly = { readOnlyHint: true, openWorldHint: false } as const;
+const noteText = z.string().trim().min(1).max(2000).describe("The detail, close to the user's own words");
+const noteFields = {
+  title: z.string().trim().min(1).max(80).optional().describe('Short headline for the theme, e.g. "The lead has to click"'),
+  topic: z
+    .enum(Object.keys(TOPICS) as [Topic, ...Topic[]])
+    .optional()
+    .describe(`Section on the user's page: ${Object.entries(TOPICS).map(([k, v]) => `${k} (${v})`).join(", ")}`),
+  examples: z
+    .array(
+      z.object({
+        title: z.string().trim().min(1).max(300),
+        year: year.optional().describe("Release year"),
+        verdict: z.enum(["liked", "disliked", "mixed"]).optional().describe("How it landed with the user"),
+        why: z.string().trim().min(1).max(120).optional().describe('A few words, e.g. "beautiful, weak characters"'),
+      }),
+    )
+    .max(8)
+    .optional()
+    .describe("Films that show this theme, from the user's own history or what they told you"),
+};
+/** Tool input → NoteFields (years default to null; undefined stays "unchanged"). */
+const fields = (f: {
+  title?: string | null;
+  topic?: Topic | null;
+  examples?: { title: string; year?: number; verdict?: "liked" | "disliked" | "mixed"; why?: string }[] | null;
+}): NoteFields => ({
+  title: f.title,
+  topic: f.topic,
+  examples: f.examples && f.examples.map((e) => ({ ...e, year: e.year ?? null })),
+});
+
+const readOnly ={ readOnlyHint: true, openWorldHint: false } as const;
 const writes = { readOnlyHint: false, destructiveHint: false, openWorldHint: false } as const;
 
 const json = (value: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }] });
 const fail = (text: string) => ({ isError: true, content: [{ type: "text" as const, text }] });
 
-export function buildServer(data: Dataset | null, memory: MemoryStore): McpServer {
-  const server = new McpServer({ name: "letterboxd", version: "1.2.0" }, { instructions: INSTRUCTIONS });
+/** Outside services the tools may call. Both are optional: without them find_film fails and ids go unchecked. */
+export interface Services {
+  /** TMDB "API Read Access Token", for find_film. */
+  tmdbToken?: string;
+  /** OMDb API key, to check the IMDb ids passed to save_picks. */
+  omdbKey?: string;
+  fetcher?: typeof fetch;
+}
+
+export function buildServer(data: Dataset | null, memory: MemoryStore, services: Services = {}): McpServer {
+  const server = new McpServer({ name: "letterboxd", version: "1.3.0" }, { instructions: INSTRUCTIONS });
   const now = () => new Date().toISOString();
+  const { tmdbToken, omdbKey, fetcher = fetch } = services;
 
   // ---------- taste memory ----------
 
@@ -82,13 +128,13 @@ export function buildServer(data: Dataset | null, memory: MemoryStore): McpServe
     {
       title: "Remember a taste fact",
       description:
-        "Save one concise fact about the user's film taste, e.g. why they rated one film above another. " +
-        "Use whenever they explain a preference or answer a question about their taste. Returns the note with its id.",
-      inputSchema: { note: z.string().trim().min(1).max(2000) },
+        "Save one theme of the user's film taste, e.g. why they rated one film above another. Use whenever they " +
+        "explain a preference or answer a question about their taste. Returns the note with its id.",
+      inputSchema: { note: noteText, ...noteFields },
       annotations: writes,
     },
-    async ({ note }) => {
-      const result = addNote(await memory.load(), note, now());
+    async ({ note, title, topic, examples }) => {
+      const result = addNote(await memory.load(), note, now(), fields({ title, topic, examples }));
       await memory.save(result.memory);
       return json(result.note);
     },
@@ -98,12 +144,20 @@ export function buildServer(data: Dataset | null, memory: MemoryStore): McpServe
     "update_note",
     {
       title: "Update a taste note",
-      description: "Replace the text of a saved note (by id from get_memory), e.g. when the user corrects or refines it.",
-      inputSchema: { id: z.string().min(1), note: z.string().trim().min(1).max(2000) },
+      description:
+        "Change a saved note (by id from get_memory), e.g. when the user corrects or refines it, or to add an example. " +
+        "Only the fields you pass change; examples replaces the whole list; pass null to clear title, topic or examples.",
+      inputSchema: {
+        id: z.string().min(1),
+        note: noteText.optional(),
+        title: noteFields.title.nullable(),
+        topic: noteFields.topic.nullable(),
+        examples: noteFields.examples.nullable(),
+      },
       annotations: { ...writes, idempotentHint: true },
     },
-    async ({ id, note }) => {
-      const next = updateNote(await memory.load(), id, note, now());
+    async ({ id, note, title, topic, examples }) => {
+      const next = updateNote(await memory.load(), id, note, now(), fields({ title, topic, examples }));
       if (!next) return fail(`No note with id ${id}. Call get_memory to see the ids.`);
       await memory.save(next);
       return json({ updated: id });
@@ -143,18 +197,51 @@ export function buildServer(data: Dataset | null, memory: MemoryStore): McpServe
   );
 
   server.registerTool(
+    "find_film",
+    {
+      title: "Find a film's IMDb id",
+      description:
+        "Look up films or series by title to get their IMDb ids, which save_picks requires. Pass every film you are about " +
+        "to save in one call. Each title returns up to 3 candidates, best guess first, with year, type, the start of " +
+        "the plot and a vote count: namesakes are common, so pick the one that is really the film you mean.",
+      inputSchema: {
+        films: z
+          .array(z.object({ title: z.string().trim().min(1).max(300), year: year.optional().describe("Release year") }))
+          .min(1)
+          .max(10),
+      },
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async ({ films }) => {
+      if (!tmdbToken) return fail("Film lookup isn't set up on this server (no TMDB token), so IMDb ids can't be looked up here.");
+      const found = await Promise.allSettled(films.map((f) => findFilm(f, tmdbToken, fetcher)));
+      return json(
+        films.map((f, i) => {
+          const r = found[i];
+          return r.status === "fulfilled"
+            ? { ...f, candidates: r.value }
+            : { ...f, candidates: [], error: "Lookup failed; try again." };
+        }),
+      );
+    },
+  );
+
+  server.registerTool(
     "save_picks",
     {
       title: "Save recommendations",
       description:
         "Replace the 'watch next' list on the user's personal page with the films you just recommended. " +
-        "Only include films they have not seen (check has_seen). Picks they later watch drop off the page automatically.",
+        "Only include films they have not seen (check has_seen). Each pick needs its IMDb id from find_film. " +
+        "The reply lists what each id is on IMDb: if one is not the film you meant, find the right id and save again. " +
+        "Picks they later watch drop off the page automatically.",
       inputSchema: {
         picks: z
           .array(
             z.object({
-              title: z.string().trim().min(1).max(300),
+              title: z.string().trim().min(1).max(300).describe("Title as on Letterboxd"),
               year: year.optional().describe("Release year"),
+              imdbId: z.string().regex(IMDB_ID, 'An IMDb id like "tt1663202", from find_film'),
               why: z.string().trim().min(1).max(1000).describe("Why it suits them, in terms of their own taste"),
             }),
           )
@@ -164,9 +251,26 @@ export function buildServer(data: Dataset | null, memory: MemoryStore): McpServe
       annotations: { ...writes, idempotentHint: true },
     },
     async ({ picks }) => {
-      const items = picks.map((p) => ({ title: p.title, year: p.year ?? null, why: p.why }));
+      // Check every id against IMDb (via OMDb) before saving, so a wrong id never reaches the page.
+      const checked = omdbKey ? await Promise.allSettled(picks.map((p) => fetchOmdb(p.imdbId, omdbKey, fetcher))) : null;
+      const unknown = picks.filter((_, i) => checked?.[i].status === "fulfilled" && checked[i].value === null);
+      if (unknown.length) {
+        return fail(
+          `Nothing was saved. IMDb has no title with these ids: ${unknown.map((p) => `${p.imdbId} (${p.title})`).join(", ")}. ` +
+            "Look them up with find_film and save again.",
+        );
+      }
+      const items = picks.map((p) => ({ title: p.title, year: p.year ?? null, imdbId: p.imdbId, why: p.why }));
       await memory.save({ ...(await memory.load()), picks: { items, updatedAt: now() } });
-      return json({ saved: items.length });
+      return json({
+        saved: items.length,
+        check: "Make sure each id is the film you meant; if not, find the right id and save again.",
+        picks: picks.map((p, i) => {
+          const r = checked?.[i];
+          const onImdb = r?.status === "fulfilled" && r.value ? `${r.value.title} (${r.value.year})` : "could not be checked";
+          return { imdbId: p.imdbId, youSaid: `${p.title}${p.year ? ` (${p.year})` : ""}`, onImdb };
+        }),
+      });
     },
   );
 
