@@ -1,6 +1,7 @@
 // The user's personal page: server-rendered HTML, no JavaScript.
 import type { Memory } from "./memory.ts";
 import { type FilmRef, filmKey, type Posters, posterUrl } from "./posters.ts";
+import type { Ratings } from "./ratings.ts";
 import { getDiary, getTasteSummary, hasSeen } from "./queries.ts";
 import type { Dataset } from "./types.ts";
 
@@ -74,6 +75,20 @@ function poster(posters: Posters | undefined, film: FilmRef): string {
     : `<span class="poster none" aria-hidden="true"></span>`;
 }
 
+/** "IMDb 7.8 · Rotten Tomatoes 94% · Metacritic 80", each linking to that site. Empty without scores. */
+function scoresLine(ratings: Ratings | undefined, film: FilmRef): string {
+  const s = ratings?.get(filmKey(film));
+  if (!s) return "";
+  const q = encodeURIComponent(film.title);
+  const link = (href: string, text: string) => `<a href="${esc(href)}" rel="noreferrer noopener" target="_blank">${esc(text)}</a>`;
+  const parts = [
+    link(`https://www.imdb.com/title/${s.imdbId}/`, s.imdb ? `IMDb ${s.imdb}` : "IMDb"),
+    s.rt && link(`https://www.rottentomatoes.com/search?search=${q}`, `Rotten Tomatoes ${s.rt}`),
+    s.mc && link(`https://www.metacritic.com/search/${q}/?category=2`, `Metacritic ${s.mc}`),
+  ].filter(Boolean);
+  return `<div class="scores">${parts.join(" · ")}</div>`;
+}
+
 /** Picks not yet watched, flagged if they're on the watchlist. */
 function pendingPicks(data: Dataset | null, memory: Memory) {
   return (memory.picks?.items ?? []).flatMap((p) => {
@@ -93,14 +108,19 @@ function diaryPage(data: Dataset, requested: number | undefined) {
   return { total, pages, page, entries };
 }
 
+/** The picks the page will show, so scores can be fetched for exactly those. */
+export function picksShown(data: Dataset | null, memory: Memory): FilmRef[] {
+  return pendingPicks(data, memory).map((p) => ({ title: p.title, year: p.year }));
+}
+
 /** Every film the page will show, so posters can be fetched for exactly those. */
 export function filmsShown(data: Dataset | null, memory: Memory, requestedPage?: number): FilmRef[] {
-  const picks = pendingPicks(data, memory).map((p) => ({ title: p.title, year: p.year }));
+  const picks = picksShown(data, memory);
   const diary = data ? diaryPage(data, requestedPage).entries.map((e) => ({ title: e.name, year: e.year })) : [];
   return [...picks, ...diary];
 }
 
-function picksSection(data: Dataset | null, memory: Memory, at: Stamp, posters?: Posters): string {
+function picksSection(data: Dataset | null, memory: Memory, at: Stamp, posters?: Posters, ratings?: Ratings): string {
   const picks = memory.picks;
   const pending = pendingPicks(data, memory);
   const body = pending.length
@@ -110,6 +130,7 @@ function picksSection(data: Dataset | null, memory: Memory, at: Stamp, posters?:
             ${poster(posters, p)}
             <div>
               <div class="pick-title">${filmLink(p.title, p.year)}${p.onWatchlist ? ' <span class="badge">on your watchlist</span>' : ""}</div>
+              ${scoresLine(ratings, p)}
               <p class="why">${esc(p.why)}</p>
             </div>
           </li>`,
@@ -222,6 +243,8 @@ export interface PageOptions {
   diaryPage?: number;
   /** Posters for the films shown (from resolvePosters). Omit to show no poster column. */
   posters?: Posters;
+  /** IMDb / RT / Metacritic scores for the picks (from resolveRatings). Omit to show none. */
+  ratings?: Ratings;
 }
 
 export function renderPage(data: Dataset | null, memory: Memory, o: PageOptions): string {
@@ -266,7 +289,7 @@ export function renderPage(data: Dataset | null, memory: Memory, o: PageOptions)
   </header>
   ${status ? `<p class="flash ${status.ok ? "ok" : "err"}" role="status">${esc(status.text)}</p>` : ""}
   ${banner}
-  ${picksSection(data, memory, at, o.posters)}
+  ${picksSection(data, memory, at, o.posters, o.ratings)}
   ${tasteSection(memory, at)}
   ${data ? recentSection(data, now, o.diaryPage, o.posters) : ""}
   ${data ? statsSection(data) : ""}
@@ -319,6 +342,9 @@ button{border:0;border-radius:10px;padding:9px 16px;background:var(--accent);col
 .date{color:var(--muted);font-size:13px;padding-top:1px;font-variant-numeric:tabular-nums}
 .stars{color:var(--star);margin-left:6px;letter-spacing:1px}
 .review{margin:4px 0 0;color:var(--muted);font-size:14px;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.scores{margin-top:3px;font-size:13px;color:var(--muted)}
+.scores a{color:var(--muted)}
+.scores a:hover{color:var(--accent)}
 .poster{display:block;width:46px;height:69px;border-radius:4px;object-fit:cover;background:var(--line);box-shadow:0 0 0 1px var(--line)}
 .picks.with-posters li{display:grid;grid-template-columns:46px 1fr;gap:14px;align-items:start}
 .diary.with-posters li{grid-template-columns:64px 46px 1fr}

@@ -2,8 +2,9 @@ import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/
 import { buildDataset } from "./dataset.ts";
 import { filesFromZip } from "./exportZip.ts";
 import { kvMemoryStore } from "./memory.ts";
-import { filmsShown, isUploadStatus, renderPage, type UploadStatus } from "./page.ts";
+import { filmsShown, isUploadStatus, picksShown, renderPage, type UploadStatus } from "./page.ts";
 import { type PosterCache, type Posters, POSTERS_KEY, resolvePosters } from "./posters.ts";
+import { type Ratings, type RatingsCache, RATINGS_KEY, resolveRatings } from "./ratings.ts";
 import { buildServer } from "./server.ts";
 import type { Dataset } from "./types.ts";
 
@@ -76,23 +77,31 @@ async function handlePage(request: Request, env: Env, ctx: ExecutionContext | un
   const params = new URL(request.url).searchParams;
   const status = params.get("status");
   const diaryPage = Number(params.get("page")) || 1;
-  const [data, memory, posterCache] = await Promise.all([
+  const isGet = request.method === "GET";
+  const [data, memory, posterCache, ratingsCache] = await Promise.all([
     env.LETTERBOXD.get<Dataset>(DATASET_KEY, "json"),
     kvMemoryStore(env.LETTERBOXD).load(),
-    env.TMDB_TOKEN ? env.LETTERBOXD.get<PosterCache>(POSTERS_KEY, "json") : null,
+    env.TMDB_TOKEN && isGet ? env.LETTERBOXD.get<PosterCache>(POSTERS_KEY, "json") : null,
+    env.OMDB_KEY && isGet ? env.LETTERBOXD.get<RatingsCache>(RATINGS_KEY, "json") : null,
   ]);
 
-  // Posters only when a TMDB token is set; lookups are cached in KV after the response.
-  let posters: Posters | undefined;
-  if (env.TMDB_TOKEN && request.method === "GET") {
-    const r = await resolvePosters(filmsShown(data, memory, diaryPage), posterCache ?? {}, env.TMDB_TOKEN, new Date());
-    posters = r.posters;
-    if (r.changed) {
-      const save = env.LETTERBOXD.put(POSTERS_KEY, JSON.stringify(r.cache));
-      if (ctx) ctx.waitUntil(save);
-      else await save;
-    }
-  }
+  // New lookups are saved to KV after the response is sent.
+  const save = async (key: string, value: unknown) => {
+    const put = env.LETTERBOXD.put(key, JSON.stringify(value));
+    if (ctx) ctx.waitUntil(put);
+    else await put;
+  };
+  const now = new Date();
+
+  // Posters only when a TMDB token is set, scores only when an OMDb key is set.
+  const [p, r] = await Promise.all([
+    env.TMDB_TOKEN && isGet ? resolvePosters(filmsShown(data, memory, diaryPage), posterCache ?? {}, env.TMDB_TOKEN, now) : null,
+    env.OMDB_KEY && isGet ? resolveRatings(picksShown(data, memory), ratingsCache ?? {}, env.OMDB_KEY, now) : null,
+  ]);
+  if (p?.changed) await save(POSTERS_KEY, p.cache);
+  if (r?.changed) await save(RATINGS_KEY, r.cache);
+  const posters: Posters | undefined = p?.posters;
+  const ratings: Ratings | undefined = r?.ratings;
 
   const html = renderPage(data, memory, {
     uploadAction: `${base}/upload`,
@@ -100,6 +109,7 @@ async function handlePage(request: Request, env: Env, ctx: ExecutionContext | un
     timeZone: typeof request.cf?.timezone === "string" ? request.cf.timezone : undefined,
     diaryPage,
     posters,
+    ratings,
   });
   return new Response(request.method === "HEAD" ? null : html, { headers: PAGE_HEADERS });
 }
