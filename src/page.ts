@@ -103,7 +103,7 @@ function pendingPicks(data: Dataset | null, memory: Memory) {
 
 /** The picks the page will show. */
 export function picksShown(data: Dataset | null, memory: Memory): FilmRef[] {
-  return pendingPicks(data, memory).map((p) => ({ title: p.title, year: p.year }));
+  return pendingPicks(data, memory).map((p) => ({ title: p.title, year: p.year, ...(p.imdbId && { imdbId: p.imdbId }) }));
 }
 
 /** IMDb ids of the picks the page will show, so scores can be fetched for exactly those. */

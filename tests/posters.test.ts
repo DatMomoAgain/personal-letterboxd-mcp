@@ -40,6 +40,33 @@ describe("resolvePosters", () => {
     expect(r2.posters.get(filmKey(films[0]))).toBe("/heat.jpg");
   });
 
+  it("prefers the exact title from that year over a more popular near-match, and looks picks up by IMDb id", async () => {
+    const paths: string[] = [];
+    const fetcher = (async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      paths.push(url.pathname);
+      if (url.pathname === "/3/find/tt1663202") {
+        expect(url.searchParams.get("external_source")).toBe("imdb_id");
+        return Response.json({ movie_results: [{ title: "The Revenant", poster_path: "/revenant.jpg" }], tv_results: [] });
+      }
+      return Response.json({
+        results: [
+          { title: "The Lion King", release_date: "2019-07-12", poster_path: "/lion.jpg" },
+          { title: "The King", release_date: "2017-01-18", poster_path: "/korean.jpg" },
+          { title: "The King", release_date: "2019-10-11", poster_path: "/king.jpg" },
+        ],
+      });
+    }) as typeof fetch;
+    const king = { title: "the king!", year: 2019 };
+    const unknown = { title: "Kingly", year: 2019 };
+    const pick = { title: "The Revenant", year: 2015, imdbId: "tt1663202" };
+    const r = await resolvePosters([king, unknown, pick], {}, "tok", NOW, fetcher);
+    expect(r.posters.get(filmKey(king))).toBe("/king.jpg");
+    expect(r.posters.get(filmKey(unknown))).toBe("/lion.jpg"); // no exact title: the top result, as before
+    expect(r.posters.get(filmKey(pick))).toBe("/revenant.jpg");
+    expect(paths.filter((p) => p.startsWith("/3/find/"))).toHaveLength(1);
+  });
+
   it("retries misses after 30 days, and never caches failures", async () => {
     const film = { title: "Obscure", year: 2001 };
     const cache: PosterCache = { [filmKey(film)]: { miss: "2026-10-01T00:00:00Z" } };

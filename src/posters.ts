@@ -16,6 +16,8 @@ export type Posters = Map<string, string>;
 export interface FilmRef {
   title: string;
   year: number | null;
+  /** Known for Claude's picks; makes the poster lookup exact. */
+  imdbId?: string;
 }
 
 export const filmKey = (f: FilmRef) => `${f.title.trim().toLowerCase()}|${f.year ?? ""}`;
@@ -24,16 +26,48 @@ export function posterUrl(path: string, width: 92 | 185 | 342 | 500): string {
   return `https://image.tmdb.org/t/p/w${width}${path}`;
 }
 
-/** One TMDB search; returns the top result's poster_path or null. Throws on network/HTTP errors. */
+interface TmdbResult {
+  title?: string;
+  original_title?: string;
+  release_date?: string;
+  poster_path?: string | null;
+}
+
+/** Titles compare equal regardless of case, accents and punctuation. */
+const plain = (s: string | undefined) =>
+  (s ?? "")
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "");
+
+/**
+ * One TMDB request; returns a poster_path or null. Throws on network/HTTP errors.
+ * With an IMDb id (picks have one) the film is looked up by it. Otherwise it's a title search,
+ * preferring a result with exactly this title from this year: TMDB ranks by popularity, so
+ * "The King" (2019) would otherwise get The Lion King's poster.
+ */
 async function searchPoster(f: FilmRef, token: string, fetcher: typeof fetch): Promise<string | null> {
-  const q = new URLSearchParams({ query: f.title, include_adult: "false" });
-  if (f.year) q.set("year", String(f.year));
-  const res = await fetcher(`https://api.themoviedb.org/3/search/movie?${q}`, {
-    headers: { authorization: `Bearer ${token}`, accept: "application/json" },
-  });
-  if (!res.ok) throw new Error(`TMDB ${res.status}`);
-  const body = (await res.json()) as { results?: { poster_path?: string | null }[] };
-  const path = body.results?.find((r) => r.poster_path)?.poster_path;
+  const get = async (path: string) => {
+    const res = await fetcher(`https://api.themoviedb.org/3/${path}`, {
+      headers: { authorization: `Bearer ${token}`, accept: "application/json" },
+    });
+    if (!res.ok) throw new Error(`TMDB ${res.status}`);
+    return (await res.json()) as { results?: TmdbResult[]; movie_results?: TmdbResult[]; tv_results?: TmdbResult[] };
+  };
+  let found: TmdbResult | undefined;
+  if (f.imdbId && /^tt\d{5,10}$/.test(f.imdbId)) {
+    const body = await get(`find/${f.imdbId}?external_source=imdb_id`);
+    found = [...(body.movie_results ?? []), ...(body.tv_results ?? [])].find((r) => r.poster_path);
+  } else {
+    const q = new URLSearchParams({ query: f.title, include_adult: "false" });
+    if (f.year) q.set("year", String(f.year));
+    const withPoster = ((await get(`search/movie?${q}`)).results ?? []).filter((r) => r.poster_path);
+    const want = plain(f.title);
+    const sameYear = (r: TmdbResult) => !f.year || Math.abs(Number.parseInt(r.release_date ?? "", 10) - f.year) <= 1;
+    found = withPoster.find((r) => sameYear(r) && (plain(r.title) === want || plain(r.original_title) === want)) ?? withPoster[0];
+  }
+  const path = found?.poster_path;
   return typeof path === "string" && /^\/[\w.-]+$/.test(path) ? path : null;
 }
 
