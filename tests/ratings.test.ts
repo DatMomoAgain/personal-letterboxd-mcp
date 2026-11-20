@@ -181,6 +181,31 @@ describe("findFilm", () => {
     expect(paths).toEqual(["/3/search/multi", "/3/tv/126308/external_ids"]);
   });
 
+  it("with a type, only that kind can match (Spotlight 2015: film and series)", async () => {
+    const paths: string[] = [];
+    const fetcher = (async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      paths.push(url.pathname);
+      if (url.pathname === "/3/search/multi") {
+        return Response.json({
+          results: [
+            { id: 1, media_type: "tv", name: "Spotlight", vote_count: 9000, first_air_date: "2015-03-01" },
+            { id: 314365, media_type: "movie", title: "Spotlight", vote_count: 8000, release_date: "2015-11-06" },
+          ],
+        });
+      }
+      return Response.json({ imdb_id: url.pathname.includes("/movie/") ? "tt1895587" : "tt4425064" });
+    }) as typeof fetch;
+
+    expect((await findFilm({ title: "Spotlight", year: 2015 }, "tok", fetcher)).best).toMatchObject({ type: "series" });
+    const film = await findFilm({ title: "Spotlight", year: 2015, type: "film" }, "tok", fetcher);
+    expect(film).toEqual({ best: expect.objectContaining({ type: "film", imdbId: "tt1895587" }), others: [] });
+    const series = await findFilm({ title: "Spotlight", year: 2015, type: "series" }, "tok", fetcher);
+    expect(series.best).toMatchObject({ type: "series", imdbId: "tt4425064" });
+    expect(paths.filter((p) => p === "/3/search/multi")).toHaveLength(3); // still one search per lookup, no extra requests
+    expect(paths).toHaveLength(6);
+  });
+
   it("returns no match when TMDB finds nothing, and a null id when TMDB has none", async () => {
     const empty = (async () => Response.json({ results: [] })) as unknown as typeof fetch;
     expect(await findFilm({ title: "Nothing" }, "tok", empty)).toEqual({ best: null, others: [] });

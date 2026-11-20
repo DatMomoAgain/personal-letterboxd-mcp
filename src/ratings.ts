@@ -194,7 +194,7 @@ const MAX_OTHERS = 3;
  * Two TMDB requests: the search, and the best guess's IMDb id. Throws on network/HTTP errors.
  */
 export async function findFilm(
-  wanted: { title: string; year?: number },
+  wanted: { title: string; year?: number; type?: "film" | "series" },
   token: string,
   fetcher: typeof fetch = fetch,
 ): Promise<FilmSearch> {
@@ -221,8 +221,10 @@ export async function findFilm(
   const yearOf = (r: { release_date?: string; first_air_date?: string }) =>
     Number.parseInt(r.release_date ?? r.first_air_date ?? "", 10) || null;
   const fits = (y: number | null) => (wanted.year && y && Math.abs(y - wanted.year) <= 1 ? 1 : 0);
+  // With a type, only that kind can be the best guess (a film and a series can share title and year).
+  const kinds = wanted.type === "film" ? ["movie"] : wanted.type === "series" ? ["tv"] : ["movie", "tv"];
   const top = ((await get(`search/multi?${q}`)).results ?? [])
-    .filter((r) => (r.media_type === "movie" || r.media_type === "tv") && Number.isInteger(r.id))
+    .filter((r) => kinds.includes(r.media_type ?? "") && Number.isInteger(r.id))
     .sort((a, b) => fits(yearOf(b)) - fits(yearOf(a)) || (b.vote_count ?? 0) - (a.vote_count ?? 0))
     .slice(0, 1 + MAX_OTHERS);
   const candidate = (r: (typeof top)[number]): Candidate => ({

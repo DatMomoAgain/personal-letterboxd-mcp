@@ -228,10 +228,17 @@ export function buildServer(data: Dataset | null, memory: MemoryStore, services:
         `Look up films or series by title (up to ${MAX_FIND_TITLES} per call). For each, the best guess comes with its ` +
         "IMDb id (which save_picks requires), IMDb rating and IMDb vote count, plus year, type and the start of the plot. " +
         "otherMatches lists namesakes without ids: if the best guess isn't the film you mean, call again with the " +
-        "right year. Pass every film you are about to save or recommend in one call.",
+        "right year, and with type if a film and a series share the title and year. Pass every film you are about " +
+        "to save or recommend in one call.",
       inputSchema: {
         films: z
-          .array(z.object({ title: z.string().trim().min(1).max(300), year: year.optional().describe("Release year") }))
+          .array(
+            z.object({
+              title: z.string().trim().min(1).max(300),
+              year: year.optional().describe("Release year"),
+              type: z.enum(["film", "series"]).optional().describe("Only match this kind, e.g. the film, not the same-named series"),
+            }),
+          )
           .min(1)
           .max(MAX_FIND_TITLES),
       },
