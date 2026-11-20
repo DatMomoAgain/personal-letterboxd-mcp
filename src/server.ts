@@ -40,19 +40,26 @@ export const INSTRUCTIONS = [
     "It holds what the user told you about their taste in earlier chats. It is the user's chosen place " +
     "for this: store film-taste facts here with remember, NOT in your own built-in memory. " +
     "Whenever the user explains a preference, answers a question about their taste, or corrects you, " +
-    "save it with remember. Each note is one theme of their taste: a short title, a topic, the detail " +
+    "propose a note in the chat and save it with remember once they agree. Each note is one theme of their taste: a short title, a topic, the detail " +
     "close to their words, and the films that show it (with whether they liked each). If a new fact belongs " +
-    "to an existing theme, extend that note with update_note instead of adding a near-duplicate. Fix stale " +
-    "notes with update_note or forget. When you recommend films, add them with save_picks to the user's 'watch next' " +
-    "list on their personal page (it adds to the list, newest first; older picks stay). Change a pick's reason with " +
-    "update_pick, and take films off with remove_picks when the user isn't interested or rules them out. " +
+    "to an existing theme, propose extending that note with update_note instead of adding a near-duplicate. Suggest fixing stale " +
+    "notes with update_note or forget.",
+  "",
+  "WATCH LIST: the 'watch next' list on the user's personal page is their own watch-later list (it has replaced " +
+    "their Letterboxd watchlist), not a feed of your recommendations. Recommend films in the chat and discuss them; " +
+    "add a film with save_picks only when the user says they're going to watch it and confirms saving it (it adds " +
+    "to the list, newest first; older picks stay). Likewise ask before changing a pick's reason with update_pick or " +
+    "taking films off with remove_picks. " +
     "save_picks needs each film's IMDb id: get them with find_film (one call for the " +
     "whole list), never from memory, and read save_picks's reply to check each id matched the film you meant. " +
     "find_film also gives each film's IMDb rating and vote count: quote those, never an estimate. " +
     "Note examples take an optional imdbId too (also from find_film); always give one for a series, or the " +
     "page may show a same-named film's poster. " +
-    "When your understanding of their taste meaningfully changes, rewrite " +
+    "When your understanding of their taste meaningfully changes, offer to rewrite " +
     "the overview with save_overview (written to them, in second person).",
+  "",
+  "ASK BEFORE WRITING: never call remember, update_note, forget, save_overview, save_picks, update_pick or " +
+    "remove_picks without the user's yes in this conversation. Show what you would save first. Reading is always fine.",
   "",
   "Then use get_taste_summary for recommendations, and get_watched for their full history. Before recommending, " +
     "check every candidate with one has_seen call (it takes the whole list).",
@@ -143,7 +150,7 @@ const MAX_FIND_TITLES = 10;
 const MAX_SEEN_TITLES = 25;
 
 export function buildServer(data: Dataset | null, memory: MemoryStore, services: Services = {}): McpServer {
-  const server = new McpServer({ name: "letterboxd", version: "1.5.0" }, { instructions: INSTRUCTIONS });
+  const server = new McpServer({ name: "letterboxd", version: "1.6.0" }, { instructions: INSTRUCTIONS });
   const now = () => new Date().toISOString();
   const { tmdbToken, omdbKey, fetcher = fetch } = services;
   const ratingsStore: RatingsStore = services.ratingsStore ?? { load: async () => ({}), save: async () => {} };
@@ -171,7 +178,7 @@ export function buildServer(data: Dataset | null, memory: MemoryStore, services:
       title: "Taste memory",
       description:
         "Call this FIRST. Everything the user has told you about their film taste in earlier chats (notes with ids), " +
-        "your last written overview of their taste, and your last saved recommendations.",
+        "your last written overview of their taste, and their watch list (the 'watch next' films they chose to watch).",
       inputSchema: {},
       annotations: readOnly,
     },
@@ -183,8 +190,9 @@ export function buildServer(data: Dataset | null, memory: MemoryStore, services:
     {
       title: "Remember a taste fact",
       description:
-        "Save one theme of the user's film taste, e.g. why they rated one film above another. Use whenever they " +
-        "explain a preference or answer a question about their taste. Returns the note with its id.",
+        "Save one theme of the user's film taste, e.g. why they rated one film above another. When they explain a " +
+        "preference or answer a question about their taste, propose the note in the chat and call this only once " +
+        "they agree. Returns the note with its id.",
       inputSchema: { note: noteText, ...noteFields },
       annotations: writes,
     },
@@ -201,7 +209,8 @@ export function buildServer(data: Dataset | null, memory: MemoryStore, services:
       title: "Update a taste note",
       description:
         "Change a saved note (by id from get_memory), e.g. when the user corrects or refines it, or to add an example. " +
-        "Only the fields you pass change; examples replaces the whole list; pass null to clear title, topic or examples.",
+        "Only the fields you pass change; examples replaces the whole list; pass null to clear title, topic or examples. " +
+        "Only after the user confirms the change.",
       inputSchema: {
         id: z.string().min(1),
         note: noteText.optional(),
@@ -223,7 +232,7 @@ export function buildServer(data: Dataset | null, memory: MemoryStore, services:
     "forget",
     {
       title: "Forget a taste note",
-      description: "Delete a saved note (by id from get_memory) that is wrong or no longer true.",
+      description: "Delete a saved note (by id from get_memory) that is wrong or no longer true. Only after the user confirms.",
       inputSchema: { id: z.string().min(1) },
       annotations: { ...writes, destructiveHint: true, idempotentHint: true },
     },
@@ -241,7 +250,8 @@ export function buildServer(data: Dataset | null, memory: MemoryStore, services:
       title: "Save taste overview",
       description:
         "Replace the written overview of the user's film taste shown on their personal page. " +
-        "Write it to them in second person, a few short paragraphs, grounded in their ratings, reviews and notes.",
+        "Write it to them in second person, a few short paragraphs, grounded in their ratings, reviews and notes. " +
+        "Only after the user agrees to the rewrite.",
       inputSchema: { text: z.string().trim().min(1).max(6000) },
       annotations: { ...writes, idempotentHint: true },
     },
@@ -312,10 +322,11 @@ export function buildServer(data: Dataset | null, memory: MemoryStore, services:
   server.registerTool(
     "save_picks",
     {
-      title: "Save recommendations",
+      title: "Add to watch list",
       description:
-        "Add the films you just recommended to the top of the 'watch next' list on the user's personal page, in the " +
-        "order given (best first). Older picks stay below them, so pass only the new ones. A film already on the list " +
+        "Add films the user has said they're going to watch to the top of the 'watch next' list on their personal page " +
+        "(their own watch-later list), in the order given. Only after they confirm saving them: never add films just " +
+        "because you recommended them. Older picks stay below them, so pass only the new ones. A film already on the list " +
         "(same IMDb id) moves to the top with the new reason. Only include films they have not seen (check has_seen); " +
         "picks they've watched are left out, and drop off later once they log them. Each pick needs its IMDb id from " +
         "find_film. The reply lists what each id is on IMDb: if one is not the film you meant, remove it with " +
@@ -375,11 +386,11 @@ export function buildServer(data: Dataset | null, memory: MemoryStore, services:
   server.registerTool(
     "update_pick",
     {
-      title: "Edit a recommendation",
+      title: "Edit a watch-list film",
       description:
         "Change a pick on the 'watch next' list (by its IMDb id, from get_memory), e.g. to rewrite its reason. " +
         "Only the fields you pass change, and it keeps its place on the list. To swap in a different film, " +
-        "remove this one with remove_picks and save the other with save_picks.",
+        "remove this one with remove_picks and save the other with save_picks. Only after the user confirms.",
       inputSchema: {
         imdbId: pickId,
         why: pickWhy.optional(),
@@ -400,10 +411,10 @@ export function buildServer(data: Dataset | null, memory: MemoryStore, services:
   server.registerTool(
     "remove_picks",
     {
-      title: "Remove recommendations",
+      title: "Remove from watch list",
       description:
         "Take films off the 'watch next' list (by IMDb id, from get_memory): ones the user isn't interested in, " +
-        "has ruled out, or that were saved under the wrong id.",
+        "has ruled out, or that were saved under the wrong id. Only after the user confirms.",
       inputSchema: { imdbIds: z.array(pickId).min(1).max(20) },
       annotations: { ...writes, destructiveHint: true, idempotentHint: true },
     },

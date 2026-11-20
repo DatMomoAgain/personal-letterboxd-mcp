@@ -128,8 +128,8 @@ function watchView(data: Dataset | null, memory: Memory, at: Stamp, posters?: Po
   const pending = pendingPicks(data, memory);
   if (!pending.length) {
     return `<section class="view" id="watch"><div class="blank">
-      <h2>${picks ? "You've watched everything Claude picked" : "No picks yet"}</h2>
-      <p>${picks ? "Ask for more in a chat." : "Ask Claude for recommendations in a chat and they'll show up here."}</p>
+      <h2>${picks ? "You've watched everything on your list" : "Your list is empty"}</h2>
+      <p>Talk films over with Claude in a chat, and the ones you decide to watch go here.</p>
     </div></section>`;
   }
   const path = (p: FilmRef) => posters?.get(filmKey(p));
@@ -162,8 +162,8 @@ function watchView(data: Dataset | null, memory: Memory, at: Stamp, posters?: Po
       <img class="glow" alt="" aria-hidden="true"${first ? ` src="${esc(posterUrl(first, 92))}"` : " hidden"}>
       ${panels}
     </div>
-    <div class="picks-nav"><div class="strip" role="group" aria-label="Claude's picks">${strip}</div>${more}</div>
-    <p class="fine">${pending.length} ${pending.length === 1 ? "pick" : "picks"} from Claude, ${at(picks!.updatedAt)}. A pick leaves this list once you've watched it.</p>
+    <div class="picks-nav"><div class="strip" role="group" aria-label="Your watch list">${strip}</div>${more}</div>
+    <p class="fine">${pending.length} ${pending.length === 1 ? "film" : "films"} on your list, updated ${at(picks!.updatedAt)}. A film leaves this list once you've watched it.</p>
   </section>`;
 }
 
@@ -344,7 +344,7 @@ function tasteView(data: Dataset | null, memory: Memory, at: Stamp, posters?: Po
           )
           .join("")}</div>
       </div>`
-    : `<p class="muted">No notes yet. They get added as you tell Claude about your taste.</p>`;
+    : `<p class="muted">No notes yet. Tell Claude about your taste in a chat, and the notes you agree on get saved here.</p>`;
   return `<section class="view" id="taste">
     ${overview}
     <div class="head">

@@ -27,6 +27,11 @@ describe("buildServer", () => {
     for (const t of tools) expect(t.annotations?.readOnlyHint).toBe(readOnly.includes(t.name));
     expect(tools.find((t) => t.name === "forget")?.annotations?.destructiveHint).toBe(true);
     expect(tools.find((t) => t.name === "remove_picks")?.annotations?.destructiveHint).toBe(true);
+    // The user approves every write: each writing tool says so, and so do the instructions.
+    for (const t of tools.filter((t) => writing.includes(t.name))) expect(t.description).toMatch(/user (confirms|agrees)|they (confirm|agree)/);
+    const instructions = client.getInstructions() ?? "";
+    for (const name of writing) expect(instructions).toContain(name);
+    expect(instructions).toContain("never call remember, update_note, forget, save_overview, save_picks, update_pick or remove_picks without the user's yes");
   });
 
   it("memory: remember, update, forget, overview and picks round-trip", async () => {

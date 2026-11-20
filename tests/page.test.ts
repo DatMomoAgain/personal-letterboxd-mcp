@@ -59,7 +59,7 @@ describe("renderPage", () => {
     expect(html).not.toContain("already seen");
     expect(html).toMatch(/<h2>The Wailing<\/h2>\s*<p class="pick-meta">2016 <span class="badge">on your watchlist/);
     expect(html).toContain("epic battles");
-    expect(html).toContain("2 picks from Claude, Nov 14");
+    expect(html).toContain("2 films on your list, updated Nov 14");
     // One strip button per pick shown.
     expect(html.match(/class="thumb"/g)).toHaveLength(2);
     // Each carries its title for the opened rows; "See all" counts the picks shown and starts hidden.
@@ -87,7 +87,7 @@ describe("renderPage", () => {
 
   it("all picks watched → friendly empty state", () => {
     const memory: Memory = { ...emptyMemory(), picks: { updatedAt: "2026-11-14", items: [{ title: "Heat", year: 1995, why: "x" }] } };
-    expect(render(fixture(), memory)).toContain("You've watched everything Claude picked");
+    expect(render(fixture(), memory)).toContain("You've watched everything on your list");
   });
 
   it("films wall: every watched film, newest first, with rating, watch dates and review", () => {
