@@ -6,11 +6,25 @@ import {
   getTasteSummary,
   getWatched,
   getWatchlist,
+  hasSeen,
   hasSeenAll,
   MAX_LIMIT,
   WATCHED_REVIEW_CHARS,
 } from "./queries.ts";
-import { addNote, type MemoryStore, type NoteFields, removeNote, TOPICS, type Topic, updateNote } from "./memory.ts";
+import {
+  addNote,
+  addPicks,
+  type Memory,
+  type MemoryStore,
+  type NoteFields,
+  type Pick,
+  removeNote,
+  removePicks,
+  TOPICS,
+  type Topic,
+  updateNote,
+  updatePick,
+} from "./memory.ts";
 import { fetchOmdb, findFilm, IMDB_ID, type Ratings, type RatingsCache, recordLookup, resolveRatings } from "./ratings.ts";
 import type { Dataset } from "./types.ts";
 
@@ -29,8 +43,10 @@ export const INSTRUCTIONS = [
     "save it with remember. Each note is one theme of their taste: a short title, a topic, the detail " +
     "close to their words, and the films that show it (with whether they liked each). If a new fact belongs " +
     "to an existing theme, extend that note with update_note instead of adding a near-duplicate. Fix stale " +
-    "notes with update_note or forget. When you recommend films, save the list with save_picks (it appears on " +
-    "the user's personal page). save_picks needs each film's IMDb id: get them with find_film (one call for the " +
+    "notes with update_note or forget. When you recommend films, add them with save_picks to the user's 'watch next' " +
+    "list on their personal page (it adds to the list, newest first; older picks stay). Change a pick's reason with " +
+    "update_pick, and take films off with remove_picks when the user isn't interested or rules them out. " +
+    "save_picks needs each film's IMDb id: get them with find_film (one call for the " +
     "whole list), never from memory, and read save_picks's reply to check each id matched the film you meant. " +
     "find_film also gives each film's IMDb rating and vote count: quote those, never an estimate. " +
     "Note examples take an optional imdbId too (also from find_film); always give one for a series, or the " +
@@ -127,10 +143,25 @@ const MAX_FIND_TITLES = 10;
 const MAX_SEEN_TITLES = 25;
 
 export function buildServer(data: Dataset | null, memory: MemoryStore, services: Services = {}): McpServer {
-  const server = new McpServer({ name: "letterboxd", version: "1.4.0" }, { instructions: INSTRUCTIONS });
+  const server = new McpServer({ name: "letterboxd", version: "1.5.0" }, { instructions: INSTRUCTIONS });
   const now = () => new Date().toISOString();
   const { tmdbToken, omdbKey, fetcher = fetch } = services;
   const ratingsStore: RatingsStore = services.ratingsStore ?? { load: async () => ({}), save: async () => {} };
+
+  const watched = (p: Pick) => {
+    const seen = data ? hasSeen(data, p.title, p.year ?? undefined) : null;
+    return !!seen?.exactMatch && seen.matches.some((m) => m.watched);
+  };
+  /** Saves memory with watched picks left out (the page hides them anyway), so the stored list is what the page shows. */
+  const savePicks = async (m: Memory): Promise<{ memory: Memory; dropped: Pick[] }> => {
+    const items = m.picks?.items ?? [];
+    const dropped = items.filter(watched);
+    const next = m.picks && dropped.length ? { ...m, picks: { ...m.picks, items: items.filter((p) => !dropped.includes(p)) } } : m;
+    await memory.save(next);
+    return { memory: next, dropped };
+  };
+  const pickId = z.string().regex(IMDB_ID, 'An IMDb id like "tt1663202"');
+  const pickWhy = z.string().trim().min(1).max(1000).describe("Why it suits them, in terms of their own taste");
 
   // ---------- taste memory ----------
 
@@ -283,18 +314,20 @@ export function buildServer(data: Dataset | null, memory: MemoryStore, services:
     {
       title: "Save recommendations",
       description:
-        "Replace the 'watch next' list on the user's personal page with the films you just recommended. " +
-        "Only include films they have not seen (check has_seen). Each pick needs its IMDb id from find_film. " +
-        "The reply lists what each id is on IMDb: if one is not the film you meant, find the right id and save again. " +
-        "Picks they later watch drop off the page automatically.",
+        "Add the films you just recommended to the top of the 'watch next' list on the user's personal page, in the " +
+        "order given (best first). Older picks stay below them, so pass only the new ones. A film already on the list " +
+        "(same IMDb id) moves to the top with the new reason. Only include films they have not seen (check has_seen); " +
+        "picks they've watched are left out, and drop off later once they log them. Each pick needs its IMDb id from " +
+        "find_film. The reply lists what each id is on IMDb: if one is not the film you meant, remove it with " +
+        "remove_picks and save the right id.",
       inputSchema: {
         picks: z
           .array(
             z.object({
               title: z.string().trim().min(1).max(300).describe("Title as on Letterboxd"),
               year: year.optional().describe("Release year"),
-              imdbId: z.string().regex(IMDB_ID, 'An IMDb id like "tt1663202", from find_film'),
-              why: z.string().trim().min(1).max(1000).describe("Why it suits them, in terms of their own taste"),
+              imdbId: pickId.describe("From find_film"),
+              why: pickWhy,
             }),
           )
           .min(1)
@@ -312,8 +345,8 @@ export function buildServer(data: Dataset | null, memory: MemoryStore, services:
             "Look them up with find_film and save again.",
         );
       }
-      const items = picks.map((p) => ({ title: p.title, year: p.year ?? null, imdbId: p.imdbId, why: p.why }));
-      await memory.save({ ...(await memory.load()), picks: { items, updatedAt: now() } });
+      const items: Pick[] = picks.map((p) => ({ title: p.title, year: p.year ?? null, imdbId: p.imdbId, why: p.why }));
+      const { memory: saved, dropped } = await savePicks(addPicks(await memory.load(), items, now()));
 
       // Keep the scores just fetched, so the page doesn't look the same films up again.
       if (checked?.some((r) => r.status === "fulfilled")) {
@@ -326,13 +359,64 @@ export function buildServer(data: Dataset | null, memory: MemoryStore, services:
         if (changed) await ratingsStore.save(cache);
       }
       return json({
-        saved: items.length,
-        check: "Make sure each id is the film you meant; if not, find the right id and save again.",
+        saved: items.length - dropped.filter((d) => items.includes(d)).length,
+        onList: saved.picks?.items.length ?? 0,
+        ...(dropped.length > 0 && { leftOutAlreadyWatched: dropped.map((p) => `${p.title}${p.year ? ` (${p.year})` : ""}`) }),
+        check: "Make sure each id is the film you meant; if not, remove it with remove_picks and save the right id.",
         picks: picks.map((p, i) => {
           const r = checked?.[i];
           const onImdb = r?.status === "fulfilled" && r.value ? `${r.value.title} (${r.value.year})` : "could not be checked";
           return { imdbId: p.imdbId, youSaid: `${p.title}${p.year ? ` (${p.year})` : ""}`, onImdb };
         }),
+      });
+    },
+  );
+
+  server.registerTool(
+    "update_pick",
+    {
+      title: "Edit a recommendation",
+      description:
+        "Change a pick on the 'watch next' list (by its IMDb id, from get_memory), e.g. to rewrite its reason. " +
+        "Only the fields you pass change, and it keeps its place on the list. To swap in a different film, " +
+        "remove this one with remove_picks and save the other with save_picks.",
+      inputSchema: {
+        imdbId: pickId,
+        why: pickWhy.optional(),
+        title: z.string().trim().min(1).max(300).optional().describe("Title as on Letterboxd"),
+        year: year.optional().describe("Release year"),
+      },
+      annotations: { ...writes, idempotentHint: true },
+    },
+    async ({ imdbId, why, title, year }) => {
+      if (why === undefined && title === undefined && year === undefined) return fail("Nothing to change: pass why, title or year.");
+      const next = updatePick(await memory.load(), imdbId, { why, title, year }, now());
+      if (!next) return fail(`No pick with IMDb id ${imdbId}. Call get_memory to see the picks.`);
+      await savePicks(next);
+      return json({ updated: imdbId });
+    },
+  );
+
+  server.registerTool(
+    "remove_picks",
+    {
+      title: "Remove recommendations",
+      description:
+        "Take films off the 'watch next' list (by IMDb id, from get_memory): ones the user isn't interested in, " +
+        "has ruled out, or that were saved under the wrong id.",
+      inputSchema: { imdbIds: z.array(pickId).min(1).max(20) },
+      annotations: { ...writes, destructiveHint: true, idempotentHint: true },
+    },
+    async ({ imdbIds }) => {
+      const current = await memory.load();
+      const onList = new Set((current.picks?.items ?? []).flatMap((p) => (p.imdbId ? [p.imdbId] : [])));
+      const notOnList = imdbIds.filter((id) => !onList.has(id));
+      if (notOnList.length === imdbIds.length) return fail(`None of these are on the list: ${notOnList.join(", ")}. Call get_memory to see the picks.`);
+      const { memory: saved } = await savePicks(removePicks(current, imdbIds, now()));
+      return json({
+        removed: imdbIds.filter((id) => onList.has(id)),
+        ...(notOnList.length > 0 && { notOnList }),
+        onList: saved.picks?.items.length ?? 0,
       });
     },
   );

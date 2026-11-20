@@ -65,7 +65,7 @@ export interface Memory {
   notes: Note[];
   /** Claude's written overview of the user's taste, shown on their page. */
   overview: { text: string; updatedAt: string } | null;
-  /** Claude's latest "watch next" recommendations, shown on their page. */
+  /** Claude's "watch next" recommendations, shown on their page: newest saves first. */
   picks: { items: Pick[]; updatedAt: string } | null;
 }
 
@@ -133,4 +133,30 @@ export function updateNote(m: Memory, id: string, text: string | undefined, now:
 export function removeNote(m: Memory, id: string): Memory | null {
   if (!m.notes.some((n) => n.id === id)) return null;
   return { ...m, notes: m.notes.filter((n) => n.id !== id) };
+}
+
+const withPicks = (m: Memory, items: Pick[], now: string): Memory => ({ ...m, picks: { items, updatedAt: now } });
+
+/**
+ * Puts these picks at the top of the list, in the order given, ahead of the older ones.
+ * A film already on the list (same IMDb id) moves up with its new details instead of appearing twice.
+ */
+export function addPicks(m: Memory, picks: Pick[], now: string): Memory {
+  const ids = new Set<string>();
+  const items = [...picks, ...(m.picks?.items ?? [])].filter((p) => !p.imdbId || (!ids.has(p.imdbId) && ids.add(p.imdbId)));
+  return withPicks(m, items, now);
+}
+
+/** Changes the pick with this IMDb id in place; fields left undefined stay as they are. Returns null when no pick has that id. */
+export function updatePick(m: Memory, imdbId: string, edit: Partial<Omit<Pick, "imdbId">>, now: string): Memory | null {
+  const items = m.picks?.items ?? [];
+  if (!items.some((p) => p.imdbId === imdbId)) return null;
+  const defined = Object.fromEntries(Object.entries(edit).filter(([, v]) => v !== undefined));
+  return withPicks(m, items.map((p) => (p.imdbId === imdbId ? { ...p, ...defined } : p)), now);
+}
+
+/** Drops the picks with these IMDb ids. */
+export function removePicks(m: Memory, imdbIds: string[], now: string): Memory {
+  const drop = new Set(imdbIds);
+  return withPicks(m, (m.picks?.items ?? []).filter((p) => !(p.imdbId && drop.has(p.imdbId))), now);
 }

@@ -22,10 +22,11 @@ describe("buildServer", () => {
     const client = await connect(fixture());
     const { tools } = await client.listTools();
     const readOnly = ["find_film", "get_diary", "get_memory", "get_reviews", "get_taste_summary", "get_watched", "get_watchlist", "has_seen"];
-    const writing = ["forget", "remember", "save_overview", "save_picks", "update_note"];
+    const writing = ["forget", "remember", "remove_picks", "save_overview", "save_picks", "update_note", "update_pick"];
     expect(tools.map((t) => t.name).sort()).toEqual([...readOnly, ...writing].sort());
     for (const t of tools) expect(t.annotations?.readOnlyHint).toBe(readOnly.includes(t.name));
     expect(tools.find((t) => t.name === "forget")?.annotations?.destructiveHint).toBe(true);
+    expect(tools.find((t) => t.name === "remove_picks")?.annotations?.destructiveHint).toBe(true);
   });
 
   it("memory: remember, update, forget, overview and picks round-trip", async () => {
@@ -43,18 +44,54 @@ describe("buildServer", () => {
     expect((await call("forget", { id: "n9" })).res.isError).toBe(true);
     await call("save_overview", { text: "You love spectacle." });
     await call("save_picks", {
-      picks: [{ title: "Heat", year: 1995, imdbId: "tt0113277", why: "Pacing" }, { title: "Ran", imdbId: "tt0089881", why: "Epic" }],
+      picks: [{ title: "Thief", year: 1981, imdbId: "tt0083190", why: "Pacing" }, { title: "Ran", imdbId: "tt0089881", why: "Epic" }],
     });
 
     const got = (await call("get_memory")).body;
     expect(got.notes.map((n: { id: string; text: string }) => [n.id, n.text])).toEqual([["n2", "Pacing matters a lot"]]);
     expect(got.overview.text).toBe("You love spectacle.");
     expect(got.picks.items).toEqual([
-      { title: "Heat", year: 1995, imdbId: "tt0113277", why: "Pacing" },
+      { title: "Thief", year: 1981, imdbId: "tt0083190", why: "Pacing" },
       { title: "Ran", year: null, imdbId: "tt0089881", why: "Epic" },
     ]);
     // A new note never reuses a forgotten id.
     expect((await call("remember", { note: "x" })).body.id).toBe("n3");
+  });
+
+  it("picks: saves add newest first, a re-saved film moves up, watched films are left out; edit and remove by id", async () => {
+    const memory = inMemoryStore();
+    const client = await connect(fixture(), memory);
+    const call = (name: string, args: Record<string, unknown>) => client.callTool({ name, arguments: args });
+    const list = () => memory.current.picks?.items.map((p) => [p.title, p.why]);
+
+    await call("save_picks", {
+      picks: [{ title: "Thief", year: 1981, imdbId: "tt0083190", why: "a" }, { title: "Ran", year: 1985, imdbId: "tt0089881", why: "b" }],
+    });
+    // Heat (1995) is watched in the fixture, so it's left out; Ran was already on the list and moves up.
+    const second = JSON.parse(
+      text(
+        await call("save_picks", {
+          picks: [
+            { title: "Heat", year: 1995, imdbId: "tt0113277", why: "c" },
+            { title: "Sorcerer", year: 1977, imdbId: "tt0076740", why: "d" },
+            { title: "Ran", year: 1985, imdbId: "tt0089881", why: "b2" },
+          ],
+        }),
+      ),
+    );
+    expect(second).toMatchObject({ saved: 2, onList: 3, leftOutAlreadyWatched: ["Heat (1995)"] });
+    expect(list()).toEqual([["Sorcerer", "d"], ["Ran", "b2"], ["Thief", "a"]]);
+
+    // Editing keeps the pick's place and changes only what's passed.
+    await call("update_pick", { imdbId: "tt0083190", why: "a2" });
+    expect(memory.current.picks?.items[2]).toEqual({ title: "Thief", year: 1981, imdbId: "tt0083190", why: "a2" });
+    expect((await call("update_pick", { imdbId: "tt0083190" })).isError).toBe(true); // nothing to change
+    expect((await call("update_pick", { imdbId: "tt0000001", why: "x" })).isError).toBe(true); // not on the list
+
+    const removed = JSON.parse(text(await call("remove_picks", { imdbIds: ["tt0089881", "tt0000001"] })));
+    expect(removed).toEqual({ removed: ["tt0089881"], notOnList: ["tt0000001"], onList: 2 });
+    expect(list()).toEqual([["Sorcerer", "d"], ["Thief", "a2"]]);
+    expect((await call("remove_picks", { imdbIds: ["tt0000001"] })).isError).toBe(true);
   });
 
   it("notes carry a title, topic and example films; updates change only what's passed", async () => {
