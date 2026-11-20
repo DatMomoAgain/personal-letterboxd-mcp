@@ -62,6 +62,9 @@ describe("renderPage", () => {
     expect(html).toContain("2 picks from Claude, Nov 14");
     // One strip button per pick shown.
     expect(html.match(/class="thumb"/g)).toHaveLength(2);
+    // Each carries its title for the opened rows; "See all" counts the picks shown and starts hidden.
+    expect(html).toContain('<span class="thumb-t" aria-hidden="true">The Wailing</span>');
+    expect(html).toMatch(/<button type="button" class="see-all" aria-expanded="false" data-n="2" hidden><span>See all<\/span><b>2<\/b><\/button>/);
   });
 
   it("hides a pick watched under a year one off, and links picks with an id to their Letterboxd page", () => {

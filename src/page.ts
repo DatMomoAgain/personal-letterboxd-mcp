@@ -152,15 +152,17 @@ function watchView(data: Dataset | null, memory: Memory, at: Stamp, posters?: Po
   const strip = pending
     .map(
       (p) =>
-        `<button type="button" class="thumb" aria-pressed="false" aria-label="${esc(p.title)}${p.year ? ` (${p.year})` : ""}">${tile(posters, p, 92, false)}</button>`,
+        `<button type="button" class="thumb" aria-pressed="false" aria-label="${esc(p.title)}${p.year ? ` (${p.year})` : ""}">${tile(posters, p, 92, false)}<span class="thumb-t" aria-hidden="true">${esc(p.title)}</span></button>`,
     )
     .join("");
+  // "See all" opens the strip into rows; the script shows it only when the picks overflow the strip.
+  const more = `<button type="button" class="see-all" aria-expanded="false" data-n="${pending.length}" hidden><span>See all</span><b>${pending.length}</b></button>`;
   return `<section class="view" id="watch">
     <div class="stage">
       <img class="glow" alt="" aria-hidden="true"${first ? ` src="${esc(posterUrl(first, 92))}"` : " hidden"}>
       ${panels}
     </div>
-    <div class="strip" role="group" aria-label="Claude's picks">${strip}</div>
+    <div class="picks-nav"><div class="strip" role="group" aria-label="Claude's picks">${strip}</div>${more}</div>
     <p class="fine">${pending.length} ${pending.length === 1 ? "pick" : "picks"} from Claude, ${at(picks!.updatedAt)}. A pick leaves this list once you've watched it.</p>
   </section>`;
 }
@@ -505,6 +507,21 @@ html:not(.js) .strip{display:none}
 .thumb:hover{opacity:.9}
 .thumb[aria-pressed=true]{opacity:1;outline:3px solid var(--accent);outline-offset:3px;transform:translateY(-4px)}
 .thumb .poster.none{font-size:13px;padding:6px}
+.picks-nav{display:flex;gap:12px;align-items:flex-start}
+.picks-nav .strip{flex:1;min-width:0}
+.thumb-t{display:none}
+.see-all{flex:none;width:84px;aspect-ratio:2/3;margin-top:18px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;border:1px dashed var(--line);border-radius:8px;background:var(--surface);color:var(--text);font:600 13px/1.2 inherit;cursor:pointer}
+.see-all[hidden]{display:none}
+.see-all:hover{border-color:var(--muted)}
+.see-all b{font:800 24px/1 var(--display)}
+.picks-nav.open{flex-wrap:wrap;gap:18px 12px;padding:18px 4px 10px}
+.picks-nav.open .strip{display:contents}
+.picks-nav.open .see-all{margin-top:0}
+.picks-nav.open .thumb{opacity:.8}
+.picks-nav.open .thumb:hover,.picks-nav.open .thumb[aria-pressed=true]{opacity:1}
+.picks-nav.open .thumb[aria-pressed=true]{outline:0}
+.picks-nav.open .thumb[aria-pressed=true] .poster{outline:3px solid var(--accent);outline-offset:3px}
+.picks-nav.open .thumb-t{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;margin-top:6px;font-size:11.5px;font-weight:600;line-height:1.25;color:var(--text);text-align:left}
 
 .tools{display:flex;flex-wrap:wrap;gap:10px;margin-bottom:12px}
 html:not(.js) .tools{display:none}
@@ -613,6 +630,9 @@ dialog .close{display:block;margin:22px 0 0 auto}
   .why{font-size:17px;margin:18px 0 22px}
   .scores{margin-top:16px;gap:8px 20px}
   .thumb{flex-basis:64px}
+  .see-all{width:64px}
+  .picks-nav.open{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:16px 10px}
+  .picks-nav.open .see-all{width:auto}
   .wall{grid-template-columns:repeat(auto-fill,minmax(92px,1fr));gap:16px 10px}
   .tools select{flex:1 1 30%;min-width:0}
   .seg{flex:1 1 100%}

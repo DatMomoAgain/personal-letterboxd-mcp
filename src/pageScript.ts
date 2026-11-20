@@ -57,10 +57,17 @@ function pick(i) {
     if (bg) glow.src = bg;
   }
 }
+const stage = $(".stage");
+const bar = $(".top");
+const motion = () => (matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth");
 thumbs.forEach((t, i) => {
   t.addEventListener("click", () => {
-    $(".stage").classList.add("live"); // animate changes the viewer makes, not the first paint
+    stage.classList.add("live"); // animate changes the viewer makes, not the first paint
     pick(i);
+    // The card changes above the strip: bring it back if it's scrolled away (likely on a phone with the rows open).
+    if (bar && stage.getBoundingClientRect().top < bar.getBoundingClientRect().bottom) {
+      stage.scrollIntoView({ block: "start", behavior: motion() });
+    }
   });
   t.addEventListener("keydown", (e) => {
     const step = e.key === "ArrowRight" ? 1 : e.key === "ArrowLeft" ? -1 : 0;
@@ -73,6 +80,34 @@ thumbs.forEach((t, i) => {
   });
 });
 if (picks.length) pick(0);
+
+// "See all" opens the strip into rows (with titles) and closes it again.
+// It only shows when the picks don't fit across the strip.
+const nav = $(".picks-nav");
+const more = $(".see-all");
+if (nav && more) {
+  const strip = $(".strip", nav);
+  const label = $("span", more);
+  const count = $("b", more);
+  const fits = () => {
+    if (nav.classList.contains("open")) return;
+    more.hidden = true;
+    more.hidden = strip.scrollWidth <= strip.clientWidth;
+  };
+  more.addEventListener("click", () => {
+    const open = nav.classList.toggle("open");
+    more.setAttribute("aria-expanded", String(open));
+    label.textContent = open ? "Show" : "See all";
+    count.textContent = open ? "less" : more.dataset.n;
+    if (!open) {
+      fits();
+      const on = $(".thumb[aria-pressed=true]", nav);
+      if (on) on.scrollIntoView({ block: "nearest", inline: "nearest" });
+    }
+  });
+  // Also covers the strip first becoming visible when the page opened on another view.
+  new ResizeObserver(fits).observe(nav);
+}
 
 // ---- films: search, filter, sort, open one -----------------------------
 const wall = $(".wall");
