@@ -2,7 +2,8 @@ import { describe, expect, it } from "vitest";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { inMemoryStore } from "../src/memory.ts";
-import { NO_DATA_MESSAGE, buildServer } from "../src/server.ts";
+import type { RatingsCache } from "../src/ratings.ts";
+import { NO_DATA_MESSAGE, type Services, buildServer } from "../src/server.ts";
 import type { Dataset } from "../src/types.ts";
 import { fixture } from "./fixture.ts";
 
@@ -20,7 +21,7 @@ describe("buildServer", () => {
   it("lists the data tools (read-only) and the memory tools", async () => {
     const client = await connect(fixture());
     const { tools } = await client.listTools();
-    const readOnly = ["find_film", "get_diary", "get_memory", "get_ratings", "get_reviews", "get_taste_summary", "get_watchlist", "has_seen"];
+    const readOnly = ["find_film", "get_diary", "get_memory", "get_reviews", "get_taste_summary", "get_watched", "get_watchlist", "has_seen"];
     const writing = ["forget", "remember", "save_overview", "save_picks", "update_note"];
     expect(tools.map((t) => t.name).sort()).toEqual([...readOnly, ...writing].sort());
     for (const t of tools) expect(t.annotations?.readOnlyHint).toBe(readOnly.includes(t.name));
@@ -82,26 +83,76 @@ describe("buildServer", () => {
     expect((await call("remember", { note: "x", topic: "not-a-topic" })).isError).toBe(true);
   });
 
-  it("save_picks requires an IMDb id, checks it, and reports what it matched", async () => {
-    const memory = inMemoryStore();
+  /** Fake TMDB + OMDb: The Revenant (2015, tt1663202) and Anora (released 2024-10-18, tt28607951); every request recorded. */
+  function fakeServices() {
+    const urls: URL[] = [];
     const fetcher = (async (input: RequestInfo | URL) => {
       const url = new URL(String(input));
+      urls.push(url);
       if (url.host === "api.themoviedb.org") {
-        if (url.pathname === "/3/search/multi") return Response.json({ results: [{ id: 281957, media_type: "movie", title: "The Revenant", release_date: "2015-12-25", vote_count: 18000 }] });
+        if (url.pathname === "/3/search/multi") {
+          return url.searchParams.get("query") === "Nope"
+            ? Response.json({ results: [] })
+            : Response.json({
+                results: [
+                  { id: 281957, media_type: "movie", title: "The Revenant", release_date: "2015-12-25", vote_count: 18000, overview: "A frontiersman." },
+                  { id: 9, media_type: "movie", title: "The Revenant", release_date: "2009-10-01", vote_count: 40 },
+                ],
+              });
+        }
         return Response.json({ imdb_id: "tt1663202" });
       }
       return url.searchParams.get("i") === "tt1663202"
-        ? Response.json({ Response: "True", Title: "The Revenant", Year: "2015", imdbRating: "8.0" })
+        ? Response.json({ Response: "True", Title: "The Revenant", Year: "2015", Released: "08 Jan 2016", imdbRating: "8.0", imdbVotes: "923,415" })
         : Response.json({ Response: "False", Error: "Incorrect IMDb ID." });
     }) as typeof fetch;
-    const server = buildServer(fixture(), memory, { tmdbToken: "tok", omdbKey: "k", fetcher });
+    let cache: RatingsCache = {};
+    const ratingsStore = { load: async () => structuredClone(cache), save: async (c: RatingsCache) => void (cache = c) };
+    return { urls, fetcher, ratingsStore, cache: () => cache };
+  }
+
+  async function connectWith(services: Services, memory = inMemoryStore()) {
+    const server = buildServer(fixture(), memory, services);
     const client = new Client({ name: "test", version: "0.0.0" });
     const [a, b] = InMemoryTransport.createLinkedPair();
     await Promise.all([server.connect(a), client.connect(b)]);
-    const call = (name: string, args: Record<string, unknown>) => client.callTool({ name, arguments: args });
+    return (name: string, args: Record<string, unknown>) => client.callTool({ name, arguments: args });
+  }
 
-    const lookedUp = JSON.parse(text(await call("find_film", { films: [{ title: "The Revenant", year: 2015 }] })));
-    expect(lookedUp[0].candidates[0]).toMatchObject({ imdbId: "tt1663202", type: "film", year: 2015 });
+  it("find_film gives the best guess its IMDb id, rating and vote count, and namesakes without ids", async () => {
+    const fake = fakeServices();
+    const call = await connectWith({ tmdbToken: "tok", omdbKey: "k", fetcher: fake.fetcher, ratingsStore: fake.ratingsStore });
+
+    const got = JSON.parse(text(await call("find_film", { films: [{ title: "The Revenant", year: 2015 }, { title: "Nope" }] })));
+    expect(got[0]).toMatchObject({
+      title: "The Revenant",
+      year: 2015,
+      match: { title: "The Revenant", year: 2015, type: "film", imdbId: "tt1663202", imdbRating: 8, imdbVotes: 923415, tmdbVotes: 18000 },
+      otherMatches: [{ title: "The Revenant", year: 2009, tmdbVotes: 40 }],
+    });
+    expect(got[1]).toEqual({ title: "Nope", match: null, otherMatches: [] });
+    // 2 TMDB requests for the found title, 1 for the other, 1 OMDb for the best guess.
+    expect(fake.urls.map((u) => u.host)).toEqual(["api.themoviedb.org", "api.themoviedb.org", "api.themoviedb.org", "www.omdbapi.com"]);
+    // Released over a year ago, so it's cached and the next lookup skips OMDb.
+    expect(fake.cache().tt1663202).toMatchObject({ imdb: "8.0", votes: 923415 });
+    fake.urls.length = 0;
+    const again = JSON.parse(text(await call("find_film", { films: [{ title: "The Revenant", year: 2015 }] })));
+    expect(again[0].match.imdbRating).toBe(8);
+    expect(fake.urls.map((u) => u.host)).not.toContain("www.omdbapi.com");
+  });
+
+  it("find_film still finds ids without an OMDb key, with null ratings", async () => {
+    const fake = fakeServices();
+    const call = await connectWith({ tmdbToken: "tok", fetcher: fake.fetcher });
+    const got = JSON.parse(text(await call("find_film", { films: [{ title: "The Revenant" }] })));
+    expect(got[0].match).toMatchObject({ imdbId: "tt1663202", imdbRating: null, imdbVotes: null });
+    expect((await call("find_film", { films: Array.from({ length: 11 }, () => ({ title: "x" })) })).isError).toBe(true);
+  });
+
+  it("save_picks requires an IMDb id, checks it, reports what it matched, and caches the scores", async () => {
+    const memory = inMemoryStore();
+    const fake = fakeServices();
+    const call = await connectWith({ tmdbToken: "tok", omdbKey: "k", fetcher: fake.fetcher, ratingsStore: fake.ratingsStore }, memory);
 
     expect((await call("save_picks", { picks: [{ title: "The Revenant", why: "x" }] })).isError).toBe(true); // no id
     const wrong = await call("save_picks", { picks: [{ title: "The Revenant", imdbId: "tt9999999", why: "x" }] });
@@ -112,6 +163,10 @@ describe("buildServer", () => {
     const ok = JSON.parse(text(await call("save_picks", { picks: [{ title: "The Revenant", year: 2015, imdbId: "tt1663202", why: "x" }] })));
     expect(ok.picks).toEqual([{ imdbId: "tt1663202", youSaid: "The Revenant (2015)", onImdb: "The Revenant (2015)" }]);
     expect(memory.current.picks?.items[0].imdbId).toBe("tt1663202");
+    // The scores it fetched to check the id are kept for the page.
+    expect(fake.cache()).toEqual({
+      tt1663202: { imdbId: "tt1663202", imdb: "8.0", votes: 923415, released: "2016-01-08", checked: expect.any(String) },
+    });
   });
 
   it("find_film says so when there's no TMDB token", async () => {
@@ -126,23 +181,34 @@ describe("buildServer", () => {
     expect(res.isError).toBeFalsy();
   });
 
-  it("has_seen returns JSON matches", async () => {
+  it("has_seen takes a list and answers each film in order", async () => {
     const client = await connect(fixture());
-    const res = await client.callTool({ name: "has_seen", arguments: { title: "suspiria", year: 1977 } });
+    const res = await client.callTool({
+      name: "has_seen",
+      arguments: { films: [{ title: "suspiria", year: 1977 }, { title: "Mulholland Drive" }] },
+    });
     const body = JSON.parse(text(res));
-    expect(body.matches).toHaveLength(1);
-    expect(body.matches[0]).toMatchObject({ name: "Suspiria", year: 1977, rating: 4, watched: true });
+    expect(body).toHaveLength(2);
+    expect(body[0].matches).toHaveLength(1);
+    expect(body[0].matches[0]).toMatchObject({ name: "Suspiria", year: 1977, rating: 4, watched: true });
+    expect(body[1]).toMatchObject({ query: "Mulholland Drive", exactMatch: false, matches: [] });
+    // List only: the old single-title form is rejected.
+    expect((await client.callTool({ name: "has_seen", arguments: { title: "Heat" } })).isError).toBe(true);
+    const tooMany = Array.from({ length: 26 }, () => ({ title: "Heat" }));
+    expect((await client.callTool({ name: "has_seen", arguments: { films: tooMany } })).isError).toBe(true);
   });
 
-  it("get_ratings passes filters through", async () => {
+  it("get_watched passes filters and sorting through", async () => {
     const client = await connect(fixture());
-    const res = await client.callTool({ name: "get_ratings", arguments: { minRating: 4.5 } });
+    const res = await client.callTool({ name: "get_watched", arguments: { minRating: 4.5, sort: "rating_desc" } });
     expect(JSON.parse(text(res)).items.map((f: { name: string }) => f.name)).toEqual(["Paddington 2", "Amélie"]);
+    const unrated = await client.callTool({ name: "get_watched", arguments: { rated: false } });
+    expect(JSON.parse(text(unrated)).items.map((f: { name: string }) => f.name)).toEqual(["Heat"]);
   });
 
   it("tools report missing dataset", async () => {
     const client = await connect(null);
-    const res = await client.callTool({ name: "get_ratings", arguments: {} });
+    const res = await client.callTool({ name: "get_watched", arguments: {} });
     expect(res.isError).toBe(true);
     expect(text(res)).toBe(NO_DATA_MESSAGE);
     expect(NO_DATA_MESSAGE).toMatch(/personal page/);
@@ -150,7 +216,7 @@ describe("buildServer", () => {
 
   it("rejects invalid input", async () => {
     const client = await connect(fixture());
-    const res = await client.callTool({ name: "get_ratings", arguments: { minRating: 9 } });
+    const res = await client.callTool({ name: "get_watched", arguments: { minRating: 9 } });
     expect(res.isError).toBe(true);
     const bad = await client.callTool({ name: "get_diary", arguments: { from: "last week" } });
     expect(bad.isError).toBe(true);

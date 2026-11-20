@@ -2,15 +2,16 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import {
   getDiary,
-  getRatings,
   getReviews,
   getTasteSummary,
+  getWatched,
   getWatchlist,
-  hasSeen,
+  hasSeenAll,
   MAX_LIMIT,
+  WATCHED_REVIEW_CHARS,
 } from "./queries.ts";
 import { addNote, type MemoryStore, type NoteFields, removeNote, TOPICS, type Topic, updateNote } from "./memory.ts";
-import { fetchOmdb, findFilm, IMDB_ID } from "./ratings.ts";
+import { fetchOmdb, findFilm, IMDB_ID, type Ratings, type RatingsCache, recordLookup, resolveRatings } from "./ratings.ts";
 import type { Dataset } from "./types.ts";
 
 export const NO_DATA_MESSAGE =
@@ -31,12 +32,14 @@ export const INSTRUCTIONS = [
     "notes with update_note or forget. When you recommend films, save the list with save_picks (it appears on " +
     "the user's personal page). save_picks needs each film's IMDb id: get them with find_film (one call for the " +
     "whole list), never from memory, and read save_picks's reply to check each id matched the film you meant. " +
+    "find_film also gives each film's IMDb rating and vote count: quote those, never an estimate. " +
     "Note examples take an optional imdbId too (also from find_film); always give one for a series, or the " +
     "page may show a same-named film's poster. " +
     "When your understanding of their taste meaningfully changes, rewrite " +
     "the overview with save_overview (written to them, in second person).",
   "",
-  "Then use get_taste_summary for recommendations, and has_seen before recommending a film.",
+  "Then use get_taste_summary for recommendations, and get_watched for their full history. Before recommending, " +
+    "check every candidate with one has_seen call (it takes the whole list).",
   "",
   "How this user rates: 2.5 stars means average. 3 stars and above means decent, and they liked " +
     "almost every film rated 3 or higher. Do not read a 3 as lukewarm or negative.",
@@ -101,19 +104,33 @@ const writes = { readOnlyHint: false, destructiveHint: false, openWorldHint: fal
 const json = (value: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }] });
 const fail = (text: string) => ({ isError: true, content: [{ type: "text" as const, text }] });
 
-/** Outside services the tools may call. Both are optional: without them find_film fails and ids go unchecked. */
+/** Where OMDb scores are cached (KV in production), shared with the page. */
+export interface RatingsStore {
+  load(): Promise<RatingsCache>;
+  save(cache: RatingsCache): Promise<void>;
+}
+
+/** Outside services the tools may call. All optional: without them find_film fails, and ids and ratings go unchecked. */
 export interface Services {
   /** TMDB "API Read Access Token", for find_film. */
   tmdbToken?: string;
-  /** OMDb API key, to check the IMDb ids passed to save_picks. */
+  /** OMDb API key, for IMDb ratings in find_film and to check the ids passed to save_picks. */
   omdbKey?: string;
+  /** Without one, nothing is cached between calls. */
+  ratingsStore?: RatingsStore;
   fetcher?: typeof fetch;
 }
 
+/** find_film takes at most this many titles: 3 outside requests each (TMDB search, TMDB id, OMDb), well under Workers Free's 50 per call. */
+const MAX_FIND_TITLES = 10;
+/** has_seen makes no outside requests; this only keeps the reply a sensible size. */
+const MAX_SEEN_TITLES = 25;
+
 export function buildServer(data: Dataset | null, memory: MemoryStore, services: Services = {}): McpServer {
-  const server = new McpServer({ name: "letterboxd", version: "1.3.0" }, { instructions: INSTRUCTIONS });
+  const server = new McpServer({ name: "letterboxd", version: "1.4.0" }, { instructions: INSTRUCTIONS });
   const now = () => new Date().toISOString();
   const { tmdbToken, omdbKey, fetcher = fetch } = services;
+  const ratingsStore: RatingsStore = services.ratingsStore ?? { load: async () => ({}), save: async () => {} };
 
   // ---------- taste memory ----------
 
@@ -206,28 +223,49 @@ export function buildServer(data: Dataset | null, memory: MemoryStore, services:
   server.registerTool(
     "find_film",
     {
-      title: "Find a film's IMDb id",
+      title: "Find a film's IMDb id and rating",
       description:
-        "Look up films or series by title to get their IMDb ids, which save_picks requires. Pass every film you are about " +
-        "to save in one call. Each title returns up to 3 candidates, best guess first, with year, type, the start of " +
-        "the plot and a vote count: namesakes are common, so pick the one that is really the film you mean.",
+        `Look up films or series by title (up to ${MAX_FIND_TITLES} per call). For each, the best guess comes with its ` +
+        "IMDb id (which save_picks requires), IMDb rating and IMDb vote count, plus year, type and the start of the plot. " +
+        "otherMatches lists namesakes without ids: if the best guess isn't the film you mean, call again with the " +
+        "right year. Pass every film you are about to save or recommend in one call.",
       inputSchema: {
         films: z
           .array(z.object({ title: z.string().trim().min(1).max(300), year: year.optional().describe("Release year") }))
           .min(1)
-          .max(10),
+          .max(MAX_FIND_TITLES),
       },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
     async ({ films }) => {
       if (!tmdbToken) return fail("Film lookup isn't set up on this server (no TMDB token), so IMDb ids can't be looked up here.");
       const found = await Promise.allSettled(films.map((f) => findFilm(f, tmdbToken, fetcher)));
+      const searches = found.map((r) => (r.status === "fulfilled" ? r.value : null));
+
+      // IMDb ratings for the best guesses: cached ones free, the rest one OMDb request each.
+      const ids = searches.flatMap((s) => (s?.best?.imdbId ? [s.best.imdbId] : []));
+      let ratings: Ratings = new Map();
+      if (omdbKey && ids.length) {
+        const r = await resolveRatings(ids, await ratingsStore.load(), omdbKey, new Date(), fetcher, ids.length);
+        if (r.changed) await ratingsStore.save(r.cache);
+        ratings = r.ratings;
+      }
+
       return json(
         films.map((f, i) => {
-          const r = found[i];
-          return r.status === "fulfilled"
-            ? { ...f, candidates: r.value }
-            : { ...f, candidates: [], error: "Lookup failed; try again." };
+          const s = searches[i];
+          if (!s) return { ...f, match: null, error: "Lookup failed; try again." };
+          if (!s.best) return { ...f, match: null, otherMatches: [] };
+          const scores = s.best.imdbId ? ratings.get(s.best.imdbId) : undefined;
+          return {
+            ...f,
+            match: {
+              ...s.best,
+              imdbRating: scores?.imdb ? Number(scores.imdb) : null,
+              imdbVotes: scores?.votes ?? null,
+            },
+            otherMatches: s.others,
+          };
         }),
       );
     },
@@ -269,6 +307,17 @@ export function buildServer(data: Dataset | null, memory: MemoryStore, services:
       }
       const items = picks.map((p) => ({ title: p.title, year: p.year ?? null, imdbId: p.imdbId, why: p.why }));
       await memory.save({ ...(await memory.load()), picks: { items, updatedAt: now() } });
+
+      // Keep the scores just fetched, so the page doesn't look the same films up again.
+      if (checked?.some((r) => r.status === "fulfilled")) {
+        const cache = await ratingsStore.load();
+        const at = new Date();
+        let changed = false;
+        checked.forEach((r, i) => {
+          if (r.status === "fulfilled" && recordLookup(cache, picks[i].imdbId, r.value, at)) changed = true;
+        });
+        if (changed) await ratingsStore.save(cache);
+      }
       return json({
         saved: items.length,
         check: "Make sure each id is the film you meant; if not, find the right id and save again.",
@@ -306,35 +355,50 @@ export function buildServer(data: Dataset | null, memory: MemoryStore, services:
   server.registerTool(
     "has_seen",
     {
-      title: "Has the user seen a film?",
+      title: "Has the user seen these films?",
       description:
-        "Look up a film by title (forgiving of case, accents, punctuation and a leading 'The'). Returns every matching film with watched status, star rating, diary dates, watchlist and liked flags, and the user's written reviews of it. Empty matches means the user has no record of it. If exactMatch is false, the matches are only partial title matches (other films), so do not assume the user has seen the film you asked about.",
+        "Check a list of films in one call (titles are matched forgivingly: case, accents, punctuation, a leading 'The'). " +
+        "Returns one result per film, in order, each with every matching film's watched status, star rating, diary dates, " +
+        "watchlist and liked flags, and the user's written reviews of it. Empty matches means the user has no record of " +
+        "it. If exactMatch is false, the matches are only partial title matches (other films), so do not assume the " +
+        "user has seen the film you asked about.",
       inputSchema: {
-        title: z.string().min(1).describe("Film title"),
-        year: year.optional().describe("Release year, to pick between remakes"),
+        films: z
+          .array(
+            z.object({
+              title: z.string().min(1).describe("Film title"),
+              year: year.optional().describe("Release year, to pick between remakes"),
+            }),
+          )
+          .min(1)
+          .max(MAX_SEEN_TITLES),
       },
       annotations: readOnly,
     },
-    answer((d, a: { title: string; year?: number }) => hasSeen(d, a.title, a.year)),
+    answer((d, a: { films: { title: string; year?: number }[] }) => hasSeenAll(d, a.films)),
   );
 
   server.registerTool(
-    "get_ratings",
+    "get_watched",
     {
-      title: "Rated films",
+      title: "Watched films",
       description:
-        "The user's star ratings (0.5–5), filterable by rating and release year, sortable, paginated. Films the user wrote about include their reviews, which explain the rating.",
+        "Every film the user has watched, rated or not, newest watch first by default. Each has its star rating " +
+        "(null if unrated), liked and watchlist flags, diary dates, lastDate (latest watch) and the user's reviews, " +
+        `cut to ${WATCHED_REVIEW_CHARS} characters (get_reviews has the full text). rated: true for only rated films, ` +
+        "false for only unrated ones. A rating filter leaves out unrated films; unrated films sort last.",
       inputSchema: {
+        rated: z.boolean().optional().describe("true: only rated films; false: only unrated ones"),
         minRating: rating.optional(),
         maxRating: rating.optional(),
         yearFrom: year.optional().describe("Earliest release year"),
         yearTo: year.optional().describe("Latest release year"),
-        sort: z.enum(["rating_desc", "rating_asc", "date_desc", "year_desc"]).optional(),
+        sort: z.enum(["date_desc", "date_asc", "rating_desc", "rating_asc", "year_desc", "year_asc", "title"]).optional(),
         ...paging,
       },
       annotations: readOnly,
     },
-    answer(getRatings),
+    answer(getWatched),
   );
 
   server.registerTool(

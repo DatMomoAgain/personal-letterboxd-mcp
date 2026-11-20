@@ -1,44 +1,69 @@
 import { describe, expect, it } from "vitest";
 import {
   MAX_LIMIT,
+  WATCHED_REVIEW_CHARS,
   getDiary,
-  getRatings,
   getReviews,
   getTasteSummary,
+  getWatched,
   getWatchlist,
   hasSeen,
+  hasSeenAll,
   normalizeTitle,
 } from "../src/queries.ts";
 import { fixture } from "./fixture.ts";
 
-describe("getRatings", () => {
-  it("getRatings filters by min rating and year range", () => {
-    const page = getRatings(fixture(), { minRating: 4, yearFrom: 1990 });
-    expect(page.items.map((f) => f.name)).toEqual(["Paddington 2", "Amélie", "Se7en"]);
-    expect(page.total).toBe(3);
+const names = (items: { name: string }[]) => items.map((f) => f.name);
+
+describe("getWatched", () => {
+  it("lists every watched film, rated or not, newest watch first", () => {
+    const page = getWatched(fixture(), {});
+    expect(page.total).toBe(7); // the watchlist-only film is not watched
+    // Diary dates first (Cats was logged without a watch date, so its log date counts), then the rest by name.
+    expect(names(page.items)).toEqual(["Cats", "Paddington 2", "Se7en", "Amélie", "Heat", "Suspiria", "Suspiria"]);
+    expect(page.items.find((f) => f.name === "Heat")).toMatchObject({ rating: null, liked: true, lastDate: "2025-08-17" });
+    expect(page.items[0]).not.toHaveProperty("watched");
   });
 
-  it("getRatings sorts and paginates", () => {
-    const page = getRatings(fixture(), { limit: 2, offset: 2 });
-    expect(page.total).toBe(6);
-    expect(page.offset).toBe(2);
-    expect(page.items.map((f) => `${f.name} ${f.year}`)).toEqual(["Se7en 1995", "Suspiria 1977"]);
-    const asc = getRatings(fixture(), { sort: "rating_asc", limit: 1 });
-    expect(asc.items[0].name).toBe("Cats");
+  it("filters by rated, rating and year", () => {
+    expect(names(getWatched(fixture(), { rated: false }).items)).toEqual(["Heat"]);
+    expect(getWatched(fixture(), { rated: true }).total).toBe(6);
+    const good = getWatched(fixture(), { minRating: 4, yearFrom: 1990, sort: "rating_desc" });
+    expect(names(good.items)).toEqual(["Paddington 2", "Amélie", "Se7en"]);
+    // A rating filter leaves out unrated films.
+    expect(names(getWatched(fixture(), { maxRating: 5 }).items)).not.toContain("Heat");
   });
 
-  it("getRatings clamps limit to 200", () => {
+  it("sorts unrated films last in either direction, and by year or title", () => {
+    const desc = getWatched(fixture(), { sort: "rating_desc" }).items;
+    const asc = getWatched(fixture(), { sort: "rating_asc" }).items;
+    expect([desc[0].name, desc.at(-1)!.name]).toEqual(["Paddington 2", "Heat"]);
+    expect([asc[0].name, asc.at(-1)!.name]).toEqual(["Cats", "Heat"]);
+    expect(getWatched(fixture(), { sort: "year_asc" }).items[0]).toMatchObject({ name: "Suspiria", year: 1977 });
+    expect(getWatched(fixture(), { sort: "year_desc" }).items[0]).toMatchObject({ name: "Cats", year: 2019 });
+    expect(getWatched(fixture(), { sort: "date_asc" }).items.at(-1)!.name).toBe("Cats");
+    expect(names(getWatched(fixture(), { sort: "title", limit: 2 }).items)).toEqual(["Amélie", "Cats"]);
+  });
+
+  it("cuts long reviews", () => {
     const d = fixture();
-    d.ratings = Array.from({ length: 250 }, (_, i) => ({
-      name: `Film ${i}`,
-      year: 2000,
-      uri: `u${i}`,
-      date: "2025-01-01",
-      rating: 3,
-    }));
+    d.reviews[0].review = "x".repeat(1000);
+    const padd = getWatched(d, {}).items.find((f) => f.name === "Paddington 2")!;
+    expect(padd.reviews[0].review).toHaveLength(WATCHED_REVIEW_CHARS + 1);
+    expect(padd.reviews[0].review.endsWith("…")).toBe(true);
+  });
+
+  it("paginates and clamps limit to 200", () => {
+    const d = fixture();
+    d.watched = Array.from({ length: 250 }, (_, i) => ({ name: `Film ${i}`, year: 2000, uri: `u${i}`, date: "2025-01-01" }));
+    d.ratings = [];
+    d.diary = [];
+    d.reviews = [];
     expect(MAX_LIMIT).toBe(200);
-    expect(getRatings(d, { limit: 1000 }).items).toHaveLength(200);
-    expect(getRatings(d, {}).items).toHaveLength(50);
+    expect(getWatched(d, { limit: 1000 }).items).toHaveLength(200);
+    expect(getWatched(d, {}).items).toHaveLength(50);
+    const p = getWatched(d, { sort: "title", limit: 2, offset: 2 });
+    expect([p.total, p.offset, names(p.items)]).toEqual([250, 2, ["Film 10", "Film 100"]]);
   });
 });
 
@@ -96,9 +121,9 @@ describe("getDiary / getWatchlist / getReviews", () => {
       { watchedDate: "2025-11-01", rating: 1, review: "Nightmare fuel." },
     ]);
     expect(hasSeen(d, "Se7en").matches[0].reviews).toEqual([]);
-    const rated = Object.fromEntries(getRatings(d, {}).items.map((f) => [f.name, f.reviews]));
-    expect(rated["Cats"]).toEqual([{ watchedDate: "2025-11-01", rating: 1, review: "Nightmare fuel." }]);
-    expect(rated["Se7en"]).toBeUndefined();
+    const watched = Object.fromEntries(getWatched(d, {}).items.map((f) => [f.name, f.reviews]));
+    expect(watched["Cats"]).toEqual([{ watchedDate: "2025-11-01", rating: 1, review: "Nightmare fuel." }]);
+    expect(watched["Se7en"]).toEqual([]);
     expect(getTasteSummary(d).reviews.map((r) => r.review)).toEqual(["Nightmare fuel.", "Perfect."]);
   });
 
@@ -198,6 +223,18 @@ describe("hasSeen", () => {
     expect(se7en[0]).toMatchObject({ uri: "https://boxd.it/s7", rating: 4, diaryDates: ["2025-09-10"] });
     expect(hasSeen(d, "Paddington 2").matches).toHaveLength(1);
     expect(getTasteSummary(d).counts.watched).toBe(7);
+  });
+
+  it("hasSeenAll answers a list in order, each like hasSeen", () => {
+    const got = hasSeenAll(fixture(), [{ title: "Se7en", year: 1995 }, { title: "Mulholland Drive" }, { title: "wailing" }]);
+    expect(got.map((r) => [r.query, r.exactMatch, r.matches.length])).toEqual([
+      ["Se7en", true, 1],
+      ["Mulholland Drive", false, 0],
+      ["wailing", true, 1],
+    ]);
+    expect(got[0]).toMatchObject({ year: 1995, matches: [{ rating: 4, watched: true }] });
+    expect(got[1]).not.toHaveProperty("year");
+    expect(got[2].matches[0]).toMatchObject({ watched: false, onWatchlist: true });
   });
 
   it("has_seen unknown title returns empty matches", () => {

@@ -22,44 +22,63 @@ function page<T>(all: T[], o: PageOptions): Page<T> {
 
 const byName = (a: Film, b: Film) => a.name.localeCompare(b.name) || (a.year ?? 0) - (b.year ?? 0);
 
-// ---------- ratings / diary / watchlist / reviews ----------
+// ---------- watched / diary / watchlist / reviews ----------
 
-export type RatingSort = "rating_desc" | "rating_asc" | "date_desc" | "year_desc";
+const highestFirst = (a: RatedFilm, b: RatedFilm) => b.rating - a.rating || byName(a, b);
+const lowestFirst = (a: RatedFilm, b: RatedFilm) => a.rating - b.rating || byName(a, b);
 
-export interface RatingsOptions extends PageOptions {
+/** Cuts long text to `max` characters, marking the cut with "…". */
+const clip = (s: string, max: number) => (s.length > max ? s.slice(0, max) + "…" : s);
+
+export type WatchedSort = "date_desc" | "date_asc" | "rating_desc" | "rating_asc" | "year_desc" | "year_asc" | "title";
+
+export interface WatchedOptions extends PageOptions {
+  /** true: only rated films; false: only unrated ones. */
+  rated?: boolean;
   minRating?: number;
   maxRating?: number;
   yearFrom?: number;
   yearTo?: number;
-  sort?: RatingSort;
+  sort?: WatchedSort;
 }
 
-const ratingSorters: Record<RatingSort, (a: RatedFilm, b: RatedFilm) => number> = {
-  rating_desc: (a, b) => b.rating - a.rating || byName(a, b),
-  rating_asc: (a, b) => a.rating - b.rating || byName(a, b),
-  date_desc: (a, b) => b.date.localeCompare(a.date) || byName(a, b),
-  year_desc: (a, b) => (b.year ?? 0) - (a.year ?? 0) || byName(a, b),
+/** Reviews in get_watched are cut to this; get_reviews has the full text. */
+export const WATCHED_REVIEW_CHARS = 300;
+
+/** Ascending order with unknown values (null) last, in either direction. */
+const nullsLast = (a: number | null, b: number | null, dir: 1 | -1) =>
+  a === null || b === null ? (a === null ? 1 : 0) - (b === null ? 1 : 0) : (a - b) * dir;
+
+const watchedSorters: Record<WatchedSort, (a: WatchedFilm, b: WatchedFilm) => number> = {
+  date_desc: (a, b) => b.lastDate.localeCompare(a.lastDate) || byName(a, b),
+  date_asc: (a, b) => a.lastDate.localeCompare(b.lastDate) || byName(a, b),
+  rating_desc: (a, b) => nullsLast(a.rating, b.rating, -1) || byName(a, b),
+  rating_asc: (a, b) => nullsLast(a.rating, b.rating, 1) || byName(a, b),
+  year_desc: (a, b) => nullsLast(a.year, b.year, -1) || byName(a, b),
+  year_asc: (a, b) => nullsLast(a.year, b.year, 1) || byName(a, b),
+  title: byName,
 };
 
-export type RatedFilmWithReviews = RatedFilm & { reviews?: SeenMatch["reviews"] };
+/** A get_watched row: `watched` is dropped (always true), reviews are clipped. */
+export type WatchedItem = Omit<WatchedFilm, "watched">;
 
-export function getRatings(d: Dataset, o: RatingsOptions): Page<RatedFilmWithReviews> {
-  const filtered = d.ratings.filter(
+/** Every watched film, rated or not: filterable, sortable (newest watch first by default), paginated. */
+export function getWatched(d: Dataset, o: WatchedOptions): Page<WatchedItem> {
+  const filtered = getFilms(d).filter(
     (f) =>
-      (o.minRating === undefined || f.rating >= o.minRating) &&
-      (o.maxRating === undefined || f.rating <= o.maxRating) &&
+      (o.rated === undefined || (f.rating !== null) === o.rated) &&
+      (o.minRating === undefined || (f.rating !== null && f.rating >= o.minRating)) &&
+      (o.maxRating === undefined || (f.rating !== null && f.rating <= o.maxRating)) &&
       (o.yearFrom === undefined || (f.year !== null && f.year >= o.yearFrom)) &&
       (o.yearTo === undefined || (f.year !== null && f.year <= o.yearTo)),
   );
-  const result = page([...filtered].sort(ratingSorters[o.sort ?? "rating_desc"]), o);
-  // Ratings use the film's URI, which is how allFilms keys films (reviews already merged in).
-  const films = allFilms(d);
+  const result = page(filtered.sort(watchedSorters[o.sort ?? "date_desc"]), o);
   return {
     ...result,
-    items: result.items.map((f) => {
-      const reviews = films.get(f.uri)?.reviews;
-      return reviews?.length ? { ...f, reviews } : f;
-    }),
+    items: result.items.map(({ watched: _, ...f }) => ({
+      ...f,
+      reviews: f.reviews.map((r) => ({ ...r, review: clip(r.review, WATCHED_REVIEW_CHARS) })),
+    })),
   };
 }
 
@@ -233,9 +252,18 @@ export interface SeenResult {
 }
 
 export function hasSeen(d: Dataset, title: string, year?: number): SeenResult {
+  return seenIn([...allFilms(d).values()], title, year);
+}
+
+/** has_seen for a list of films, merging the user's lists only once. */
+export function hasSeenAll(d: Dataset, wanted: { title: string; year?: number }[]): (SeenResult & { year?: number })[] {
+  const films = [...allFilms(d).values()];
+  return wanted.map((w) => ({ ...seenIn(films, w.title, w.year), ...(w.year !== undefined && { year: w.year }) }));
+}
+
+function seenIn(films: SeenMatch[], title: string, year?: number): SeenResult {
   const q = normalizeTitle(title);
   if (!q) return { query: title, exactMatch: false, matches: [] };
-  const films = [...allFilms(d).values()];
   const exact = films.filter((f) => normalizeTitle(f.name) === q);
   let candidates = matchTitle(films, title);
   // Release years differ by one between sources (festival vs. wide release, TMDB vs. Letterboxd),
@@ -303,8 +331,8 @@ export function getTasteSummary(d: Dataset): TasteSummary {
     },
     averageRating: avg1(d.ratings.map((f) => f.rating)),
     ratingDistribution,
-    topRated: [...d.ratings].sort(ratingSorters.rating_desc).slice(0, 20),
-    lowestRated: [...d.ratings].sort(ratingSorters.rating_asc).slice(0, 10),
+    topRated: [...d.ratings].sort(highestFirst).slice(0, 20),
+    lowestRated: [...d.ratings].sort(lowestFirst).slice(0, 10),
     decades: [...byDecade.entries()]
       .sort(([a], [b]) => a - b)
       .map(([dec, films]) => ({
@@ -318,7 +346,7 @@ export function getTasteSummary(d: Dataset): TasteSummary {
       watchedDate: diaryDay(r),
       rating: r.rating,
       rewatch: r.rewatch,
-      review: r.review.length > SUMMARY_REVIEW_CHARS ? r.review.slice(0, SUMMARY_REVIEW_CHARS) + "…" : r.review,
+      review: clip(r.review, SUMMARY_REVIEW_CHARS),
     })),
   };
 }

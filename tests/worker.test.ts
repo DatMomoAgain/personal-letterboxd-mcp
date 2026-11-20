@@ -109,7 +109,7 @@ describe("worker MCP", () => {
   });
 
   it("empty KV gives the no-data message", async () => {
-    const res = await worker.fetch(rpc(`/mcp/${TOKEN}`, call("get_ratings")), env(null));
+    const res = await worker.fetch(rpc(`/mcp/${TOKEN}`, call("get_watched")), env(null));
     const body: any = await res.json();
     expect(body.result.isError).toBe(true);
     expect(body.result.content[0].text).toBe(NO_DATA_MESSAGE);

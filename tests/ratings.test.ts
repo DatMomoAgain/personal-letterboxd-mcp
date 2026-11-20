@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { emptyMemory, type Memory } from "../src/memory.ts";
 import { pickIdsShown, renderPage } from "../src/page.ts";
-import { findFilm, MAX_RATING_LOOKUPS_PER_VIEW, type RatingsCache, resolveRatings } from "../src/ratings.ts";
+import { findFilm, MAX_RATING_LOOKUPS_PER_VIEW, type RatingsCache, recordLookup, resolveRatings } from "../src/ratings.ts";
 import { fixture } from "./fixture.ts";
 
 const NOW = new Date("2026-11-20T12:00:00Z");
@@ -21,11 +21,13 @@ function fakeOmdb(db: Record<string, Reply>) {
   return { calls, fetcher };
 }
 
-const found = (title: string, imdb: string, rt?: string, mc?: string) => ({
+const found = (title: string, imdb: string, rt?: string, mc?: string, released = "28 May 2009") => ({
   Response: "True",
   Title: title,
-  Year: "2009",
+  Year: released.slice(-4),
+  Released: released,
   imdbRating: imdb,
+  imdbVotes: "112,345",
   Ratings: [
     { Source: "Internet Movie Database", Value: `${imdb}/10` },
     ...(rt ? [{ Source: "Rotten Tomatoes", Value: rt }] : []),
@@ -42,7 +44,8 @@ describe("resolveRatings", () => {
     expect(omdb.calls[0].searchParams.get("apikey")).toBe("k3y");
     expect(omdb.calls[0].searchParams.get("i")).toBe("tt1216496");
     expect(omdb.calls[0].searchParams.has("t")).toBe(false); // never by title
-    expect(r.ratings.get("tt1216496")).toEqual({ imdbId: "tt1216496", imdb: "7.8", rt: "96%", mc: "79" });
+    expect(r.ratings.get("tt1216496")).toEqual({ imdbId: "tt1216496", imdb: "7.8", votes: 112345, rt: "96%", mc: "79" });
+    expect(r.cache.tt1216496).toMatchObject({ released: "2009-05-28", checked: NOW.toISOString() });
     expect(r.ratings.has("tt0000001")).toBe(false);
     expect(r.changed).toBe(true);
 
@@ -50,18 +53,71 @@ describe("resolveRatings", () => {
     const r2 = await resolveRatings(ids, r.cache, "k3y", NOW, again.fetcher);
     expect(again.calls).toHaveLength(0);
     expect(r2.changed).toBe(false);
-    expect(r2.ratings.get("tt1216496")?.imdb).toBe("7.8");
+    expect(r2.ratings.get("tt1216496")).toEqual({ imdbId: "tt1216496", imdb: "7.8", votes: 112345, rt: "96%", mc: "79" });
   });
 
-  it("refreshes after 30 days, and never caches failures like a bad key or the daily limit", async () => {
-    const cache: RatingsCache = { tt1216496: { imdbId: "tt1216496", imdb: "7.7", checked: "2026-10-01T00:00:00Z" } };
+  it("re-checks after 7 days, and never caches failures like a bad key or the daily limit", async () => {
+    const weekOld = "2026-11-12T00:00:00Z";
+    const cache: RatingsCache = { tt1216496: { imdbId: "tt1216496", imdb: "7.7", released: "2009-05-28", checked: weekOld } };
     const fresh = fakeOmdb({ tt1216496: found("Mother", "7.8") });
     expect((await resolveRatings(["tt1216496"], cache, "k", NOW, fresh.fetcher)).ratings.get("tt1216496")?.imdb).toBe("7.8");
+    // Six days old is still fresh.
+    const recent = { tt1216496: { ...cache.tt1216496, checked: "2026-11-14T13:00:00Z" } } as RatingsCache;
+    const none = fakeOmdb({});
+    await resolveRatings(["tt1216496"], recent, "k", NOW, none.fetcher);
+    expect(none.calls).toHaveLength(0);
 
     const limited = fakeOmdb({ tt1216496: { status: 401, body: { Response: "False", Error: "Request limit reached!" } } });
     const r = await resolveRatings(["tt1216496"], cache, "k", NOW, limited.fetcher);
     expect(r.changed).toBe(false);
     expect(r.ratings.get("tt1216496")?.imdb).toBe("7.7"); // old scores kept meanwhile
+  });
+
+  it("caches only films released over a year ago; newer ones are looked up every time", async () => {
+    const omdb = fakeOmdb({
+      tt0000010: found("Old", "7.0", undefined, undefined, "19 Nov 2025"), // a year and a day before NOW
+      tt0000011: found("New", "8.1", undefined, undefined, "21 Nov 2025"), // just under a year
+      tt0000012: { Response: "True", Title: "Ongoing", Year: "2026–", imdbRating: "8.4" }, // no exact date: end of 2026
+    });
+    const ids = ["tt0000010", "tt0000011", "tt0000012"];
+    const r = await resolveRatings(ids, {}, "k", NOW, omdb.fetcher);
+    expect(Object.keys(r.cache)).toEqual(["tt0000010"]);
+    expect([...r.ratings.keys()]).toEqual(ids); // all three still get their scores
+
+    // Next time only the new ones are asked again.
+    const again = fakeOmdb({ tt0000011: found("New", "8.0", undefined, undefined, "21 Nov 2025"), tt0000012: found("Ongoing", "8.4") });
+    const r2 = await resolveRatings(ids, r.cache, "k", NOW, again.fetcher);
+    expect(again.calls.map((u) => u.searchParams.get("i"))).toEqual(["tt0000011", "tt0000012"]);
+    expect(r2.ratings.get("tt0000011")?.imdb).toBe("8.0");
+  });
+
+  it("re-checks entries saved before the one-year rule, and drops them if the film is new", async () => {
+    const cache: RatingsCache = {
+      tt0000020: { imdbId: "tt0000020", imdb: "6.0", checked: NOW.toISOString() }, // no release date: old format
+    };
+    const omdb = fakeOmdb({ tt0000020: found("Recent", "6.5", undefined, undefined, "01 Oct 2026") });
+    const r = await resolveRatings(["tt0000020"], cache, "k", NOW, omdb.fetcher);
+    expect(omdb.calls).toHaveLength(1);
+    expect(r.cache).toEqual({});
+    expect(r.changed).toBe(true);
+    expect(r.ratings.get("tt0000020")?.imdb).toBe("6.5");
+  });
+
+  it("recordLookup stores misses and old films, skips new ones", () => {
+    const cache: RatingsCache = {};
+    expect(recordLookup(cache, "tt0000030", null, NOW)).toBe(true);
+    expect(cache.tt0000030).toEqual({ miss: NOW.toISOString() });
+    const title = (released: string | null) => ({ title: "X", year: "2000", released, scores: { imdbId: "tt0000031", imdb: "7.0" } });
+    expect(recordLookup(cache, "tt0000031", title("2000-01-01"), NOW)).toBe(true);
+    expect(recordLookup(cache, "tt0000032", title("2026-11-01"), NOW)).toBe(false);
+    expect(recordLookup(cache, "tt0000033", title(null), NOW)).toBe(false);
+    expect(Object.keys(cache).sort()).toEqual(["tt0000030", "tt0000031"]);
+  });
+
+  it("can be limited to fewer lookups, taken in the order given", async () => {
+    const omdb = fakeOmdb({});
+    await resolveRatings(["tt0000041", "tt0000042", "tt0000043"], {}, "k", NOW, omdb.fetcher, 2);
+    expect(omdb.calls.map((u) => u.searchParams.get("i"))).toEqual(["tt0000041", "tt0000042"]);
   });
 
   it("drops cache entries from when scores were keyed by title", async () => {
@@ -91,7 +147,7 @@ describe("resolveRatings", () => {
 });
 
 describe("findFilm", () => {
-  it("returns films and series with IMDb ids, matching year first, then most voted", async () => {
+  it("gives the best guess (matching year first, then most voted) an IMDb id, and lists namesakes for free", async () => {
     const paths: string[] = [];
     const fetcher = (async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = new URL(String(input));
@@ -113,13 +169,26 @@ describe("findFilm", () => {
     }) as typeof fetch;
 
     const got = await findFilm({ title: "Shōgun", year: 2024 }, "tok", fetcher);
-    // The 2024 film has no IMDb id on TMDB, so it's left out; the person is never a candidate.
-    expect(got.map((c) => [c.imdbId, c.type, c.year, c.votes])).toEqual([
-      ["tt2788316", "series", 2024, 1500],
-      ["tt0080274", "series", 1980, 900],
+    expect(got.best).toMatchObject({ imdbId: "tt2788316", type: "series", year: 2024, tmdbVotes: 1500 });
+    expect(got.best!.overview).toHaveLength(160);
+    // The person is never a candidate; namesakes come without ids.
+    expect(got.others.map((c) => [c.title, c.type, c.year, c.tmdbVotes])).toEqual([
+      ["Shōgun", "film", 2024, 3],
+      ["Shōgun", "series", 1980, 900],
     ]);
-    expect(got[0].overview).toHaveLength(160);
-    expect(paths).toHaveLength(4);
+    expect(got.others[0]).not.toHaveProperty("imdbId");
+    // Two requests per title: the search and the best guess's id.
+    expect(paths).toEqual(["/3/search/multi", "/3/tv/126308/external_ids"]);
+  });
+
+  it("returns no match when TMDB finds nothing, and a null id when TMDB has none", async () => {
+    const empty = (async () => Response.json({ results: [] })) as unknown as typeof fetch;
+    expect(await findFilm({ title: "Nothing" }, "tok", empty)).toEqual({ best: null, others: [] });
+    const noId = (async (input: RequestInfo | URL) =>
+      new URL(String(input)).pathname === "/3/search/multi"
+        ? Response.json({ results: [{ id: 2, media_type: "movie", title: "Obscure", vote_count: 1 }] })
+        : Response.json({ imdb_id: null })) as typeof fetch;
+    expect((await findFilm({ title: "Obscure" }, "tok", noId)).best).toMatchObject({ title: "Obscure", imdbId: null });
   });
 
   it("throws when TMDB fails", async () => {

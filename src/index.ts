@@ -83,7 +83,15 @@ async function handleMcp(request: Request, env: Env): Promise<Response> {
   // and no sessions to DELETE. Clients treat 405 on GET as "no stream".
   if (request.method !== "POST") return notAllowed("POST");
   const data = await env.LETTERBOXD.get<Dataset>(DATASET_KEY, "json");
-  const server = buildServer(data, kvMemoryStore(env.LETTERBOXD), { tmdbToken: env.TMDB_TOKEN, omdbKey: env.OMDB_KEY });
+  const server = buildServer(data, kvMemoryStore(env.LETTERBOXD), {
+    tmdbToken: env.TMDB_TOKEN,
+    omdbKey: env.OMDB_KEY,
+    // The same cache the page uses, so a film looked up here is free on the page and vice versa.
+    ratingsStore: {
+      load: async () => (await env.LETTERBOXD.get<RatingsCache>(RATINGS_KEY, "json")) ?? {},
+      save: (cache) => env.LETTERBOXD.put(RATINGS_KEY, JSON.stringify(cache)),
+    },
+  });
   // Stateless: a fresh server + transport per request, plain JSON responses.
   const transport = new WebStandardStreamableHTTPServerTransport({
     sessionIdGenerator: undefined,
