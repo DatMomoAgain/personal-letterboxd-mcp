@@ -36,7 +36,7 @@ taste notes, which keeps those from overcorrecting, and out of get_memory, which
   (batch; reason or null). `save_title_note` (whole text or null). Removed: `add_/update_/
   remove_dont_recommend`, `get_diary` (replaced by `watchedFrom`/`watchedTo` on `get_watched`).
   `get_watched` marks `hasClaudeNote` instead of carrying the text. `get_taste_summary` carries 10
-  reviews, not 30. 13 tools, down from 18.
+  reviews, not 30. 16 tools, down from 18.
 - **Instructions:** look a title up before asking about it; one-title facts go to records, reasons
   across films to taste notes; read a note before replacing it and show the full new text.
 - **Page (Films):** each title in one place, first rule wins: logged → the wall (its panel shows the
