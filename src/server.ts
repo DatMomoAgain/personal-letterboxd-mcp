@@ -12,9 +12,13 @@ import {
   WATCHED_REVIEW_CHARS,
 } from "./queries.ts";
 import {
+  addDontRecommend,
   addNote,
   addPicks,
   archiveWatched,
+  dontRecommendFinder,
+  removeDontRecommend,
+  updateDontRecommend,
   type Memory,
   type MemoryStore,
   type NoteFields,
@@ -60,11 +64,20 @@ export const INSTRUCTIONS = [
     "When your understanding of their taste meaningfully changes, offer to rewrite " +
     "the overview with save_overview (written to them, in second person).",
   "",
-  "ASK BEFORE WRITING: never call remember, update_note, forget, save_overview, save_picks, update_pick or " +
-    "remove_picks without the user's yes in this conversation. Show what you would save first. Reading is always fine.",
+  "DON'T RECOMMEND LIST: titles the user doesn't want recommended, each with their reason (already seen elsewhere, " +
+    "e.g. a series that isn't on Letterboxd; watched and disliked; on hold for now; anything else). It is never loaded " +
+    "up front: check_films flags a listed title with dontRecommend. Never recommend a flagged title. When the user turns " +
+    "down or rules out a single title, offer to add it here with add_dont_recommend instead of proposing a taste note; " +
+    "taste notes are for reasons that hold across several films. Entries need an IMDb id from find_film. Change a " +
+    "reason with update_dont_recommend and take titles off with remove_dont_recommend.",
+  "",
+  "ASK BEFORE WRITING: never call remember, update_note, forget, save_overview, save_picks, update_pick, " +
+    "remove_picks, add_dont_recommend, update_dont_recommend or remove_dont_recommend without the user's yes in this " +
+    "conversation. Show what you would save first. Reading is always fine.",
   "",
   "Then use get_taste_summary for recommendations, and get_watched for their full history. Before recommending, " +
-    "check every candidate with one has_seen call (it takes the whole list).",
+    "check every candidate with one check_films call (it takes the whole list): it says whether they've seen each " +
+    "one and whether it's on their don't-recommend list.",
   "",
   "How this user rates: 2.5 stars means average. 3 stars and above means decent, and they liked " +
     "almost every film rated 3 or higher. Do not read a 3 as lukewarm or negative.",
@@ -82,7 +95,7 @@ export const INSTRUCTIONS = [
   "- Keep proposing notes when you notice something. But a review explains what worked or didn't in THAT film; " +
     "don't turn one review into a general rule. Base a note on something the user says about their taste in " +
     "general, or on the same reason showing up across several films.",
-  "- Before proposing a note or a change to one, look for contradictions in their history (get_watched, has_seen): " +
+  "- Before proposing a note or a change to one, look for contradictions in their history (get_watched, check_films):" +
     "films they rated highly that have the trait you're about to call a dislike, or low-rated films that have the " +
     "trait you're about to call a love. Mention what you find; if it undercuts the idea, don't propose it.",
   "- Notes are preferences, not dealbreakers, unless the user calls something a dealbreaker. Write and weigh them that way.",
@@ -92,7 +105,7 @@ export const INSTRUCTIONS = [
   "- Recent reviews are a few data points among 100+ ratings. Don't weigh them more than the rest.",
   "",
   "PAST PICKS: a film that was on their watch list carries pickedBecause (your reason for recommending it, with " +
-    "pickedOn when known) in has_seen, get_watched and get_diary. Compare it with their rating and review to learn " +
+    "pickedOn when known) in check_films, get_watched and get_diary. Compare it with their rating and review to learn " +
     "what landed, but one miss doesn't mean the reasoning was wrong (see above).",
 ].join("\n");
 
@@ -165,11 +178,11 @@ export interface Services {
 
 /** find_film takes at most this many titles: 3 outside requests each (TMDB search, TMDB id, OMDb), well under Workers Free's 50 per call. */
 const MAX_FIND_TITLES = 10;
-/** has_seen makes no outside requests; this only keeps the reply a sensible size. */
+/** check_films makes no outside requests; this only keeps the reply a sensible size. */
 const MAX_SEEN_TITLES = 25;
 
 export function buildServer(data: Dataset | null, memory: MemoryStore, services: Services = {}): McpServer {
-  const server = new McpServer({ name: "letterboxd", version: "1.7.0" }, { instructions: INSTRUCTIONS });
+  const server = new McpServer({ name: "letterboxd", version: "1.8.0" }, { instructions: INSTRUCTIONS });
   const now = () => new Date().toISOString();
   const { tmdbToken, omdbKey, fetcher = fetch } = services;
   const ratingsStore: RatingsStore = services.ratingsStore ?? { load: async () => ({}), save: async () => {} };
@@ -196,8 +209,8 @@ export function buildServer(data: Dataset | null, memory: MemoryStore, services:
       description:
         "Call this FIRST. Everything the user has told you about their film taste in earlier chats (notes with ids), " +
         "your last written overview of their taste, and their watch list (the 'watch next' films they chose to watch " +
-        "and haven't watched yet). Films they've watched from the list show up as pickedBecause in has_seen, " +
-        "get_watched and get_diary instead.",
+        "and haven't watched yet). Films they've watched from the list show up as pickedBecause in check_films, " +
+        "get_watched and get_diary instead. Their don't-recommend list isn't here: check_films flags those titles.",
       inputSchema: {},
       annotations: readOnly,
     },
@@ -206,7 +219,7 @@ export function buildServer(data: Dataset | null, memory: MemoryStore, services:
       const loaded = await memory.load();
       const { memory: m, moved } = archiveWatched(loaded, watched, now());
       if (moved.length) await memory.save(m);
-      const { pastPicks: _, ...shown } = m;
+      const { pastPicks: _, dontRecommend: __, ...shown } = m;
       return json(shown);
     },
   );
@@ -355,7 +368,7 @@ export function buildServer(data: Dataset | null, memory: MemoryStore, services:
         "Add films the user has said they're going to watch to the top of the 'watch next' list on their personal page " +
         "(their own watch-later list), in the order given. Only after they confirm saving them: never add films just " +
         "because you recommended them. Older picks stay below them, so pass only the new ones. A film already on the list " +
-        "(same IMDb id) moves to the top with the new reason. Only include films they have not seen (check has_seen); " +
+        "(same IMDb id) moves to the top with the new reason. Only include films they have not seen and that aren't on their don't-recommend list (check_films); " +
         "picks they've watched are left out, and drop off later once they log them. Each pick needs its IMDb id from " +
         "find_film. The reply lists what each id is on IMDb: if one is not the film you meant, remove it with " +
         "remove_picks and save the right id.",
@@ -463,6 +476,91 @@ export function buildServer(data: Dataset | null, memory: MemoryStore, services:
     },
   );
 
+  // ---------- don't recommend ----------
+
+  const reason = z.string().trim().min(1).max(300).describe('Why, in the user\'s words, e.g. "already seen, series" or "on hold for now"');
+
+  server.registerTool(
+    "add_dont_recommend",
+    {
+      title: "Add to don't-recommend list",
+      description:
+        "Add films or series the user doesn't want recommended to their don't-recommend list, each with their reason " +
+        "(already seen elsewhere, disliked, on hold, …). Only after they confirm. Each needs its IMDb id from find_film. " +
+        "A title already on the list (same IMDb id) is replaced with the new details. check_films flags listed titles.",
+      inputSchema: {
+        entries: z
+          .array(
+            z.object({
+              title: z.string().trim().min(1).max(300),
+              year: year.optional().describe("Release year (first year, for a series)"),
+              imdbId: pickId.describe("From find_film"),
+              reason,
+            }),
+          )
+          .min(1)
+          .max(20),
+      },
+      annotations: { ...writes, idempotentHint: true },
+    },
+    async ({ entries }) => {
+      const next = addDontRecommend(
+        await memory.load(),
+        entries.map((e) => ({ title: e.title, year: e.year ?? null, imdbId: e.imdbId, reason: e.reason })),
+        now(),
+      );
+      await memory.save(next);
+      return json({ added: entries.map((e) => `${e.title}${e.year ? ` (${e.year})` : ""}`), onList: next.dontRecommend?.length ?? 0 });
+    },
+  );
+
+  server.registerTool(
+    "update_dont_recommend",
+    {
+      title: "Edit a don't-recommend entry",
+      description:
+        "Change an entry on the don't-recommend list (by its IMDb id), e.g. its reason. Only the fields you pass " +
+        "change. Only after the user confirms.",
+      inputSchema: {
+        imdbId: pickId,
+        reason: reason.optional(),
+        title: z.string().trim().min(1).max(300).optional(),
+        year: year.optional().describe("Release year"),
+      },
+      annotations: { ...writes, idempotentHint: true },
+    },
+    async ({ imdbId, reason, title, year }) => {
+      if (reason === undefined && title === undefined && year === undefined) return fail("Nothing to change: pass reason, title or year.");
+      const next = updateDontRecommend(await memory.load(), imdbId, { reason, title, year });
+      if (!next) return fail(`No don't-recommend entry with IMDb id ${imdbId}.`);
+      await memory.save(next);
+      return json({ updated: imdbId });
+    },
+  );
+
+  server.registerTool(
+    "remove_dont_recommend",
+    {
+      title: "Remove from don't-recommend list",
+      description: "Take titles off the don't-recommend list (by IMDb id), so they can be recommended again. Only after the user confirms.",
+      inputSchema: { imdbIds: z.array(pickId).min(1).max(20) },
+      annotations: { ...writes, destructiveHint: true, idempotentHint: true },
+    },
+    async ({ imdbIds }) => {
+      const current = await memory.load();
+      const listed = new Set((current.dontRecommend ?? []).map((e) => e.imdbId));
+      const notOnList = imdbIds.filter((id) => !listed.has(id));
+      if (notOnList.length === imdbIds.length) return fail(`None of these are on the don't-recommend list: ${notOnList.join(", ")}.`);
+      const next = removeDontRecommend(current, imdbIds);
+      await memory.save(next);
+      return json({
+        removed: imdbIds.filter((id) => listed.has(id)),
+        ...(notOnList.length > 0 && { notOnList }),
+        onList: next.dontRecommend?.length ?? 0,
+      });
+    },
+  );
+
   // ---------- Letterboxd data (read-only) ----------
 
   /** Wraps a query: JSON text result, or the no-data error when nothing is uploaded. */
@@ -474,13 +572,14 @@ export function buildServer(data: Dataset | null, memory: MemoryStore, services:
     };
 
   /** Adds pickedBecause (and pickedOn, when known) to a film that was one of Claude's picks. */
-  const withReasons = async () => {
-    const find = pickReasonFinder(await memory.load());
+  const withReasonsFrom = (m: Memory) => {
+    const find = pickReasonFinder(m);
     return <F extends { name: string; year: number | null }>(f: F) => {
       const r = find(f);
       return r ? { ...f, pickedBecause: r.why, ...(r.addedAt && { pickedOn: r.addedAt.slice(0, 10) }) } : f;
     };
   };
+  const withReasons = async () => withReasonsFrom(await memory.load());
 
   server.registerTool(
     "get_taste_summary",
@@ -495,15 +594,17 @@ export function buildServer(data: Dataset | null, memory: MemoryStore, services:
   );
 
   server.registerTool(
-    "has_seen",
+    "check_films",
     {
-      title: "Has the user seen these films?",
+      title: "Check films before recommending",
       description:
-        "Check a list of films in one call (titles are matched forgivingly: case, accents, punctuation, a leading 'The'). " +
-        "Returns one result per film, in order, each with every matching film's watched status, star rating, diary dates, " +
-        "watchlist and liked flags, and the user's written reviews of it. Empty matches means the user has no record of " +
-        "it. If exactMatch is false, the matches are only partial title matches (other films), so do not assume the " +
-        "user has seen the film you asked about. A film that was one of your picks carries pickedBecause.",
+        "Check a list of films or series in one call before recommending them (titles are matched forgivingly: case, " +
+        "accents, punctuation, a leading 'The'). Returns one result per title, in order. dontRecommend (with the user's " +
+        "reason) means it's on their don't-recommend list: do not recommend it, whatever its matches say. matches are " +
+        "their Letterboxd records: watched status, star rating, diary dates, watchlist and liked flags, and their written " +
+        "reviews. Empty matches means Letterboxd has no record of it. If exactMatch is false, the matches are only " +
+        "partial title matches (other films), so do not assume the user has seen the film you asked about. A film that " +
+        "was one of your picks carries pickedBecause.",
       inputSchema: {
         films: z
           .array(
@@ -518,8 +619,19 @@ export function buildServer(data: Dataset | null, memory: MemoryStore, services:
       annotations: readOnly,
     },
     async (a: { films: { title: string; year?: number }[] }) => {
-      const reason = await withReasons();
-      return answer((d, b: typeof a) => hasSeenAll(d, b.films).map((r) => ({ ...r, matches: r.matches.map(reason) })))(a);
+      const m = await memory.load();
+      const reason = withReasonsFrom(m);
+      const listed = dontRecommendFinder(m);
+      return answer((d, b: typeof a) =>
+        hasSeenAll(d, b.films).map((r, i) => {
+          const entry = listed({ name: b.films[i].title, year: b.films[i].year ?? null });
+          return {
+            ...r,
+            ...(entry && { dontRecommend: { reason: entry.reason, addedOn: entry.addedAt.slice(0, 10) } }),
+            matches: r.matches.map(reason),
+          };
+        }),
+      )(a);
     },
   );
 
@@ -588,7 +700,7 @@ export function buildServer(data: Dataset | null, memory: MemoryStore, services:
     {
       title: "Reviews",
       description:
-        "The user's written reviews, newest first: their own words on what worked and what didn't. Filter by title (forgiving, like has_seen) or star rating, e.g. maxRating 2.5 to see what they dislike and why.",
+        "The user's written reviews, newest first: their own words on what worked and what didn't. Filter by title (forgiving, like check_films) or star rating, e.g. maxRating 2.5 to see what they dislike and why.",
       inputSchema: {
         title: z.string().min(1).optional().describe("Film title"),
         minRating: rating.optional(),

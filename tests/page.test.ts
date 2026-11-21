@@ -116,6 +116,25 @@ describe("renderPage", () => {
     expect(html).toContain("<h4>Why Claude picked it <span>· Nov 2</span></h4><p>Mann at his peak</p>");
   });
 
+  it("films view: the don't-recommend list sits below the wall, escaped, and only when it has entries", () => {
+    expect(section(render(fixture()), "films")).not.toContain("Don't recommend");
+    const memory: Memory = {
+      ...emptyMemory(),
+      dontRecommend: [
+        { title: "Barry", year: 2018, imdbId: "tt5348176", reason: "dropped in <b>season 1</b>", addedAt: "2026-11-22T00:00:00Z" },
+        { title: "RRR", year: null, imdbId: "tt8178634", reason: "didn't like it", addedAt: "2026-11-22T00:00:00Z" },
+      ],
+    };
+    const html = section(render(fixture(), memory), "films");
+    expect(html.indexOf("Don't recommend")).toBeGreaterThan(html.indexOf('<ul class="wall">'));
+    expect(html).toContain('href="https://letterboxd.com/imdb/tt5348176/"');
+    expect(html).toContain('<span class="dr-title">Barry</span> <span class="muted num">2018</span>');
+    expect(html).toContain("dropped in &lt;b&gt;season 1&lt;/b&gt;");
+    expect(html).toContain('<span class="dr-title">RRR</span></a>');
+    // Not films on the wall: the count and the posters are unchanged.
+    expect(html.match(/<a class="film"/g)).toHaveLength(7);
+  });
+
   it("films wall: every watched film, newest first, with rating, watch dates and review", () => {
     const html = render(fixture());
     expect(html.match(/<a class="film"/g)).toHaveLength(7);

@@ -234,7 +234,25 @@ function filmsView(data: Dataset, memory: Memory, now: Date, posters?: Posters):
     <ul class="wall">${wall}</ul>
     <p class="nomatch" hidden>No films match.</p>
     <button type="button" class="more btn quiet" hidden>Show more</button>
+    ${dontRecommendBlock(memory)}
   </section>`;
+}
+
+/** The don't-recommend list, below the wall: one row per title with the user's reason. Nothing when it's empty. */
+function dontRecommendBlock(memory: Memory): string {
+  const list = memory.dontRecommend ?? [];
+  if (!list.length) return "";
+  const rows = list
+    .map(
+      (e) => `<li><a href="${esc(letterboxdByImdb(e.imdbId))}" ${EXT}><span class="dr-title">${esc(e.title)}</span>${
+        e.year ? ` <span class="muted num">${e.year}</span>` : ""
+      }</a><span class="dr-why">${esc(e.reason)}</span></li>`,
+    )
+    .join("");
+  return `<div class="dont-rec">
+      <div class="head"><h2>Don't recommend</h2><p class="fine">Claude won't suggest these. To change the list, tell Claude in a chat.</p></div>
+      <ul>${rows}</ul>
+    </div>`;
 }
 
 // ---------- Taste ----------
@@ -546,6 +564,15 @@ html:not(.js) .tools{display:none}
 .heart{color:var(--heart);font-size:13px;letter-spacing:0;line-height:1}
 .nomatch{padding:48px 0;color:var(--muted)}
 .more{display:flex;margin:28px auto 0}
+.dont-rec{margin-top:56px}
+.dont-rec ul{list-style:none;margin:0;padding:0;background:var(--surface);border-radius:16px}
+.dont-rec li{display:grid;grid-template-columns:minmax(0,2fr) minmax(0,3fr);gap:4px 24px;align-items:baseline;padding:14px 22px}
+.dont-rec li+li{border-top:1px solid var(--line)}
+.dont-rec a{text-decoration:none}
+.dont-rec a:hover .dr-title{text-decoration:underline;text-underline-offset:3px}
+#films .dont-rec .fine{display:block;margin:0;min-height:0}
+.dr-title{font-weight:600}
+.dr-why{color:var(--muted);font-size:15px}
 
 dialog{border:0;border-radius:20px;padding:28px;background:var(--surface);color:var(--text);width:min(680px,calc(100vw - 32px));max-height:calc(100vh - 48px);box-shadow:0 40px 80px -20px rgba(0,0,0,.6)}
 dialog::backdrop{background:rgba(8,9,12,.62);backdrop-filter:blur(3px)}
@@ -657,6 +684,8 @@ dialog .close{display:block;margin:22px 0 0 auto}
   .examples{display:flex;flex-wrap:wrap;margin-top:16px}
   .ex a{max-width:260px}
   .topic[open]{padding-bottom:20px}
+  .dont-rec{margin-top:40px}
+  .dont-rec li{grid-template-columns:1fr;padding:12px 18px}
   .fd{grid-template-columns:96px minmax(0,1fr);gap:16px}
   .fd h3{font-size:30px}
   dialog{padding:22px}

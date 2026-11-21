@@ -70,6 +70,16 @@ export interface PastPick extends Pick {
   movedAt: string;
 }
 
+/** A film or series Claude must not recommend, and why (already seen elsewhere, disliked, on hold, …). */
+export interface DontRecommend {
+  title: string;
+  year: number | null;
+  /** Which title this is; also what edits and removals go by. */
+  imdbId: string;
+  reason: string;
+  addedAt: string;
+}
+
 export interface Memory {
   notes: Note[];
   /** Claude's written overview of the user's taste, shown on their page. */
@@ -78,6 +88,8 @@ export interface Memory {
   picks: { items: Pick[]; updatedAt: string } | null;
   /** Picks the user has watched, most recently moved first. Missing in memory saved before 2026-11-22. */
   pastPicks?: PastPick[];
+  /** Titles not to recommend, newest first. Looked up per film (check_films), never loaded up front. */
+  dontRecommend?: DontRecommend[];
 }
 
 /** Load/save seam: KV in the Worker, a plain variable in tests. */
@@ -88,7 +100,7 @@ export interface MemoryStore {
 
 export const MEMORY_KEY = "memory";
 
-export const emptyMemory = (): Memory => ({ notes: [], overview: null, picks: null, pastPicks: [] });
+export const emptyMemory = (): Memory => ({ notes: [], overview: null, picks: null, pastPicks: [], dontRecommend: [] });
 
 /** Tolerates a missing or partly-shaped stored value. */
 export function normalizeMemory(raw: unknown): Memory {
@@ -99,6 +111,7 @@ export function normalizeMemory(raw: unknown): Memory {
     overview: m.overview ?? null,
     picks: m.picks ?? null,
     pastPicks: Array.isArray(m.pastPicks) ? m.pastPicks : [],
+    dontRecommend: Array.isArray(m.dontRecommend) ? m.dontRecommend : [],
   };
 }
 
@@ -194,6 +207,44 @@ export function archiveWatched(m: Memory, isWatched: (p: Pick) => boolean, now: 
     },
     moved,
   };
+}
+
+// ---------- don't recommend ----------
+
+/** Puts these entries at the top, in the order given. A title already listed (same IMDb id) is replaced, not duplicated. */
+export function addDontRecommend(m: Memory, entries: Omit<DontRecommend, "addedAt">[], now: string): Memory {
+  const ids = new Set<string>();
+  const list = [...entries.map((e) => ({ ...e, addedAt: now })), ...(m.dontRecommend ?? [])].filter((e) => !ids.has(e.imdbId) && ids.add(e.imdbId));
+  return { ...m, dontRecommend: list };
+}
+
+/** Changes the entry with this IMDb id in place; fields left undefined stay. Returns null when no entry has that id. */
+export function updateDontRecommend(
+  m: Memory,
+  imdbId: string,
+  edit: Partial<Omit<DontRecommend, "imdbId" | "addedAt">>,
+): Memory | null {
+  const list = m.dontRecommend ?? [];
+  if (!list.some((e) => e.imdbId === imdbId)) return null;
+  const defined = Object.fromEntries(Object.entries(edit).filter(([, v]) => v !== undefined));
+  return { ...m, dontRecommend: list.map((e) => (e.imdbId === imdbId ? { ...e, ...defined } : e)) };
+}
+
+/** Drops the entries with these IMDb ids. */
+export function removeDontRecommend(m: Memory, imdbIds: string[]): Memory {
+  const drop = new Set(imdbIds);
+  return { ...m, dontRecommend: (m.dontRecommend ?? []).filter((e) => !drop.has(e.imdbId)) };
+}
+
+/** Finds a title's entry by title and release year (one off either way, like picks). Unlisted titles get undefined. */
+export function dontRecommendFinder(m: Memory): (film: { name: string; year: number | null }) => DontRecommend | undefined {
+  const byTitle = new Map<string, DontRecommend[]>();
+  for (const e of m.dontRecommend ?? []) {
+    const k = normalizeTitle(e.title);
+    byTitle.set(k, [...(byTitle.get(k) ?? []), e]);
+  }
+  return (film) =>
+    byTitle.get(normalizeTitle(film.name))?.find((e) => e.year === null || film.year === null || Math.abs(e.year - film.year) <= 1);
 }
 
 export interface PickReason {
