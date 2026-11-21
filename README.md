@@ -10,9 +10,11 @@ It works from Letterboxd's official data export, not scraping and not your passw
 
 The private page, with my own data:
 
-![Watch next: Claude's picks on a poster stage with IMDb, Rotten Tomatoes and Metacritic scores](docs/screenshots/watch-next.png)
+![Watch next: your watch list on a poster stage with IMDb, Rotten Tomatoes and Metacritic scores](docs/screenshots/watch-next.png)
 
-![Films: a poster wall of everything watched, with search, filters and sorting](docs/screenshots/films.png)
+![Films: a poster wall of everything watched, with stars, a heart on liked films, search, filters and sorting](docs/screenshots/films.png)
+
+![A watched film: your rating and review, then why Claude picked it](docs/screenshots/film-detail.png)
 
 ![Taste: Claude's overview, then its notes grouped by topic with example films](docs/screenshots/taste.png)
 
@@ -21,25 +23,64 @@ The private page, with my own data:
 ## What it does
 
 **For Claude (MCP tools)**
-- Read: taste summary, ratings, diary, reviews, watchlist, and "have I seen this?", with your review
-  text attached wherever a film appears.
+- Read: taste summary, every watched film (`get_watched`), diary, reviews, watchlist, and "have I
+  seen these?" (`has_seen`, a whole list at once), with your review text attached wherever a film
+  appears. `find_film` looks up IMDb ids, ratings and vote counts, so recommendations quote real scores.
 - Taste memory: Claude saves what it learns about your taste (`remember`, `update_note`, `forget`)
-  in your own Cloudflare KV, not in Claude's memory, and reads it first in every chat.
-- Saves its recommendations and a written overview of your taste for the personal page. Each
-  saved pick carries an IMDb id, which Claude gets from `find_film` (a TMDB search) and the server
-  checks on save, so scores always belong to the right film.
+  in your own Cloudflare KV, not in Claude's memory, and reads it first in every chat. It asks before
+  every write, and its instructions guard against overcorrecting: one review isn't a general rule,
+  a proposed note gets checked against the rest of your ratings first, and one missed recommendation
+  is no reason to rewrite your taste.
+- Your watch list (`save_picks`, `update_pick`, `remove_picks`): films you decide to watch in a chat,
+  each with Claude's reason. Each carries an IMDb id the server checks on save, so scores always
+  belong to the right film. Once you've watched one, its reason is kept: Claude sees it as
+  `pickedBecause` whenever it looks that film up, next to your rating and review, so it can learn
+  what landed.
+- A written overview of your taste for the personal page (`save_overview`).
 
 **For you (a private web page)**
-- **Watch next:** Claude's picks one at a time on a poster stage (they disappear once you've watched
-  them), with IMDb, Rotten Tomatoes and Metacritic scores linking to each site.
-- **Films:** a poster wall of everything you've watched, with search, filters (liked, reviewed, rating,
-  decade) and sorting. Selecting a film shows your rating, watch dates and review.
+- **Watch next:** your watch list one film at a time on a poster stage (films leave it once you've
+  watched them), with Claude's reason and IMDb, Rotten Tomatoes and Metacritic scores linking to each site.
+- **Films:** a poster wall of everything you've watched, with stars, a heart on liked films, search,
+  filters (liked, reviewed, Claude's picks, rating, decade) and sorting. Selecting a film shows your
+  rating, watch dates and review, and for a past pick, why Claude picked it.
 - **Taste:** Claude's overview, then its notes about you grouped by topic. Each note is a theme with a
   headline, the detail, and example films showing your rating and how each landed. Rating and decade
   charts jump to the matching films.
 - An upload dialog for a new Letterboxd export ZIP, so it works from any device.
 - Server-rendered HTML with one small inline script (per-request CSP nonce, no network access, no
   third-party code), no-referrer, noindex. Without JavaScript it's one long readable page.
+
+## Talking to it
+
+It works best when you say which of three things you want: talk about a film, get recommendations,
+or review your taste notes. Asking "anything you want to revise?" invites Claude to find changes.
+
+**After watching something** (the best source of taste notes)
+> Just watched The Revenant, gave it 3.5. Let's talk about it.
+
+> Logged Moneyball. Ask me anything you're unsure about from my review.
+
+Claude asks questions, and notes come from what you say, not from reading too much into one review.
+
+**Recommendations**
+> Recommend 5 films for tonight. In the mood for something tense, under 2 hours.
+
+> Something like Spotlight: capable people solving a problem.
+
+> Pick one film from my watch next list for tonight.
+
+A mood only counts for that chat. A count and a running time keep the list focused.
+
+**Reviewing your taste notes** (now and then, not after every film)
+> Review my taste notes against my whole history. Flag anything contradicted or out of date, but
+> don't propose new notes.
+
+> Is there a pattern in my last 10 ratings that shows up across several films? Only flag it if it's in more than one.
+
+> How did your recent picks land?
+
+If Claude reads too much into something, "that was just about that film" is enough to correct it.
 
 ## How access works
 
