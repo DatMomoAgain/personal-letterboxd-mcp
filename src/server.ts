@@ -75,6 +75,19 @@ export const INSTRUCTIONS = [
   "When their taste is unclear (e.g. why one film rated higher than a similar one, or what put them " +
     "off something), do not guess or invent a reason. Ask the user directly; they want to be asked, " +
     "and a review alone often does not explain it.",
+  "",
+  "UPDATING NOTES WITHOUT OVERCORRECTING:",
+  "- Keep proposing notes when you notice something. But a review explains what worked or didn't in THAT film; " +
+    "don't turn one review into a general rule. Base a note on something the user says about their taste in " +
+    "general, or on the same reason showing up across several films.",
+  "- Before proposing a note or a change to one, look for contradictions in their history (get_watched, has_seen): " +
+    "films they rated highly that have the trait you're about to call a dislike, or low-rated films that have the " +
+    "trait you're about to call a love. Mention what you find; if it undercuts the idea, don't propose it.",
+  "- Notes are preferences, not dealbreakers, unless the user calls something a dealbreaker. Write and weigh them that way.",
+  "- Recommendations will sometimes miss, and that's fine. If a pick fit their taste and is well regarded, a miss " +
+    "doesn't mean it was a bad pick. Don't drop or downgrade similar films, or rewrite their taste, because of one " +
+    "miss; they're happy to watch more films like it.",
+  "- Recent reviews are a few data points among 100+ ratings. Don't weigh them more than the rest.",
 ].join("\n");
 
 const rating = z.number().min(0.5).max(5);
@@ -178,11 +191,16 @@ export function buildServer(data: Dataset | null, memory: MemoryStore, services:
       title: "Taste memory",
       description:
         "Call this FIRST. Everything the user has told you about their film taste in earlier chats (notes with ids), " +
-        "your last written overview of their taste, and their watch list (the 'watch next' films they chose to watch).",
+        "your last written overview of their taste, and their watch list (the 'watch next' films they chose to watch, " +
+        "minus any they've since logged as watched).",
       inputSchema: {},
       annotations: readOnly,
     },
-    async () => json(await memory.load()),
+    async () => {
+      // Picks the user has since watched stay in storage (the page hides them too) but aren't shown as still to watch.
+      const m = await memory.load();
+      return json(m.picks ? { ...m, picks: { ...m.picks, items: m.picks.items.filter((p) => !watched(p)) } } : m);
+    },
   );
 
   server.registerTool(
@@ -192,7 +210,8 @@ export function buildServer(data: Dataset | null, memory: MemoryStore, services:
       description:
         "Save one theme of the user's film taste, e.g. why they rated one film above another. When they explain a " +
         "preference or answer a question about their taste, propose the note in the chat and call this only once " +
-        "they agree. Returns the note with its id.",
+        "they agree. Before proposing, check their history for films that contradict it; one film's review is not a " +
+        "general rule. Returns the note with its id.",
       inputSchema: { note: noteText, ...noteFields },
       annotations: writes,
     },
@@ -210,7 +229,8 @@ export function buildServer(data: Dataset | null, memory: MemoryStore, services:
       description:
         "Change a saved note (by id from get_memory), e.g. when the user corrects or refines it, or to add an example. " +
         "Only the fields you pass change; examples replaces the whole list; pass null to clear title, topic or examples. " +
-        "Only after the user confirms the change.",
+        "Before proposing a change, check their history for films that contradict it; one film's review is not a " +
+        "general rule. Only after the user confirms the change.",
       inputSchema: {
         id: z.string().min(1),
         note: noteText.optional(),

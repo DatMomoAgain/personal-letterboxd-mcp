@@ -99,6 +99,16 @@ describe("buildServer", () => {
     expect((await call("remove_picks", { imdbIds: ["tt0000001"] })).isError).toBe(true);
   });
 
+  it("get_memory leaves out picks the user has since watched, without deleting them from storage", async () => {
+    const heat = { title: "Heat", year: 1995, imdbId: "tt0113277", why: "watched since it was picked" };
+    const thief = { title: "Thief", year: 1981, imdbId: "tt0083190", why: "still to watch" };
+    const memory = inMemoryStore({ notes: [], overview: null, picks: { items: [heat, thief], updatedAt: "2026-11-01T00:00:00.000Z" } });
+    const client = await connect(fixture(), memory);
+    const got = JSON.parse(text(await client.callTool({ name: "get_memory", arguments: {} })));
+    expect(got.picks.items).toEqual([thief]);
+    expect(memory.current.picks?.items).toEqual([heat, thief]);
+  });
+
   it("notes carry a title, topic and example films; updates change only what's passed", async () => {
     const memory = inMemoryStore();
     const client = await connect(fixture(), memory);
