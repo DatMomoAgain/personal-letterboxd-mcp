@@ -1,7 +1,7 @@
 // The user's personal page: three views (Watch next, Films, Taste) rendered on the server.
 // A small inline script (pageScript.ts) switches views and filters; without it the page
 // is one long document with everything visible.
-import { type Example, type Memory, type Note, TOPICS } from "./memory.ts";
+import { type Example, type Memory, type Note, type PickReason, pickReasonFinder, TOPICS } from "./memory.ts";
 import { PAGE_SCRIPT } from "./pageScript.ts";
 import { type FilmRef, filmKey, type Posters, posterUrl } from "./posters.ts";
 import type { Ratings } from "./ratings.ts";
@@ -169,7 +169,7 @@ function watchView(data: Dataset | null, memory: Memory, at: Stamp, posters?: Po
 
 // ---------- Films ----------
 
-function filmDetail(f: WatchedFilm, now: Date, posters?: Posters): string {
+function filmDetail(f: WatchedFilm, now: Date, posters?: Posters, reason?: PickReason): string {
   const ref = { title: f.name, year: f.year };
   const has = posters?.has(filmKey(ref));
   const dates = f.diaryDates.map((d) => day(d, now));
@@ -181,24 +181,29 @@ function filmDetail(f: WatchedFilm, now: Date, posters?: Posters): string {
       <p class="fd-rating">${f.rating === null ? '<span class="muted">Not rated</span>' : `<span class="stars" aria-label="${f.rating} stars">${stars(f.rating)}</span>`}${f.liked ? ' <span class="badge">liked</span>' : ""}</p>
       ${dates.length ? `<p class="muted">Watched ${dates.join(", ")}</p>` : ""}
       ${f.reviews.map((r) => `<blockquote>${paragraphs(r.review)}</blockquote>`).join("")}
+      ${reason ? `<div class="picked"><h4>Why Claude picked it${reason.addedAt ? ` <span>· ${day(reason.addedAt, now)}</span>` : ""}</h4>${paragraphs(reason.why)}</div>` : ""}
       <a class="btn" href="${esc(f.uri || letterboxdSearch(f.name))}" ${EXT}>Open on Letterboxd</a>
     </div>
   </div>`;
 }
 
-function filmsView(data: Dataset, now: Date, posters?: Posters): string {
+function filmsView(data: Dataset, memory: Memory, now: Date, posters?: Posters): string {
   const films = getFilms(data);
   if (!films.length) return "";
   const ratingSteps = [...new Set(films.flatMap((f) => (f.rating === null ? [] : [f.rating])))].sort((a, b) => b - a);
   const decades = [...new Set(films.flatMap((f) => (f.year ? [Math.floor(f.year / 10) * 10] : [])))].sort((a, b) => b - a);
+  const reasonFor = pickReasonFinder(memory);
+  let picked = 0;
   const wall = films
     .map((f) => {
       const label = `${f.name}${f.year ? ` (${f.year})` : ""}`;
+      const reason = reasonFor(f);
+      if (reason) picked++;
       return `<li><a class="film" href="${esc(f.uri || letterboxdSearch(f.name))}" ${EXT} title="${esc(label)}" aria-label="${esc(label)}"
-        data-t="${esc(fold(f.name))}" data-r="${f.rating ?? ""}" data-y="${f.year ?? ""}" data-l="${f.liked ? 1 : 0}" data-v="${f.reviews.length ? 1 : 0}">
+        data-t="${esc(fold(f.name))}" data-r="${f.rating ?? ""}" data-y="${f.year ?? ""}" data-l="${f.liked ? 1 : 0}" data-v="${f.reviews.length ? 1 : 0}" data-p="${reason ? 1 : 0}">
         ${tile(posters, { title: f.name, year: f.year }, 185)}
-        <span class="film-stars">${stars(f.rating)}${f.reviews.length ? '<span class="dot" title="Reviewed"></span>' : ""}</span>
-      </a><template>${filmDetail(f, now, posters)}</template></li>`;
+        <span class="film-stars">${stars(f.rating)}${f.liked ? '<span class="heart" title="Liked">♥</span>' : ""}${f.reviews.length ? '<span class="dot" title="Reviewed"></span>' : ""}</span>
+      </a><template>${filmDetail(f, now, posters, reason)}</template></li>`;
     })
     .join("");
   return `<section class="view" id="films">
@@ -208,6 +213,7 @@ function filmsView(data: Dataset, now: Date, posters?: Posters): string {
         <button type="button" data-flag="" aria-pressed="true">All</button>
         <button type="button" data-flag="liked" aria-pressed="false">Liked</button>
         <button type="button" data-flag="reviewed" aria-pressed="false">Reviewed</button>
+        ${picked ? '<button type="button" data-flag="picked" aria-pressed="false" title="Films Claude picked for you">Picks</button>' : ""}
       </div>
       <select id="rating" aria-label="Rating"><option value="">Any rating</option>${ratingSteps
         .map((r) => `<option value="${r}">${stars(r)}</option>`)
@@ -418,7 +424,7 @@ export function renderPage(data: Dataset | null, memory: Memory, o: PageOptions)
   ${status ? `<p class="flash ${status.ok ? "ok" : "err"}" role="status">${esc(status.text)}</p>` : ""}
   ${banner}
   ${watchView(data, memory, at, o.posters, o.ratings)}
-  ${data ? filmsView(data, now, o.posters) : ""}
+  ${data ? filmsView(data, memory, now, o.posters) : ""}
   ${tasteView(data, memory, at, o.posters)}
 </main>
 <footer>
@@ -442,9 +448,9 @@ ${o.nonce ? `<script nonce="${esc(o.nonce)}">${PAGE_SCRIPT}</script>` : ""}
 }
 
 const CSS = `
-:root{color-scheme:light dark;--bg:#f2f3f5;--surface:#fff;--raise:#e8eaee;--line:#d9dce3;--text:#15171c;--muted:#5d6471;--accent:#ffcf33;--on-accent:#1b1600;--ink:#7d5c00;--err:#b42318;--err-soft:#fde8e6;--glow:.5;
+:root{color-scheme:light dark;--bg:#f2f3f5;--surface:#fff;--raise:#e8eaee;--line:#d9dce3;--text:#15171c;--muted:#5d6471;--accent:#ffcf33;--on-accent:#1b1600;--ink:#7d5c00;--heart:#d9480f;--err:#b42318;--err-soft:#fde8e6;--glow:.5;
 --display:"Big Shoulders","Avenir Next Condensed","Roboto Condensed","Arial Narrow",system-ui,sans-serif;--body:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
-@media (prefers-color-scheme:dark){:root{--bg:#0f1115;--surface:#181b21;--raise:#22262e;--line:#2c313b;--text:#f1f2f4;--muted:#99a0ad;--ink:#ffcf33;--err:#ff8a7a;--err-soft:#3a1714;--glow:.42}}
+@media (prefers-color-scheme:dark){:root{--bg:#0f1115;--surface:#181b21;--raise:#22262e;--line:#2c313b;--text:#f1f2f4;--muted:#99a0ad;--ink:#ffcf33;--heart:#ff8a4c;--err:#ff8a7a;--err-soft:#3a1714;--glow:.42}}
 *{box-sizing:border-box}
 [hidden]{display:none!important}
 html{scroll-padding-top:90px}
@@ -537,6 +543,7 @@ html:not(.js) .tools{display:none}
 .film:hover .poster{transform:translateY(-4px);outline:2px solid var(--accent);outline-offset:2px}
 .film-stars{display:flex;align-items:center;gap:6px;min-height:20px;margin-top:6px;font-size:12px;letter-spacing:1px;color:var(--ink)}
 .dot{width:5px;height:5px;border-radius:50%;background:var(--muted)}
+.heart{color:var(--heart);font-size:13px;letter-spacing:0;line-height:1}
 .nomatch{padding:48px 0;color:var(--muted)}
 .more{display:flex;margin:28px auto 0}
 
@@ -560,6 +567,11 @@ dialog .close{display:block;margin:22px 0 0 auto}
 .stars{color:var(--ink);letter-spacing:2px;font-size:18px}
 .fd blockquote{margin:16px 0 0;padding-left:14px;border-left:3px solid var(--accent)}
 .fd blockquote p{margin:0 0 8px}
+.picked{margin-top:18px;padding:12px 14px;border-radius:10px;background:var(--raise);color:var(--muted);font-size:14px;line-height:1.5}
+.picked h4{margin:0 0 4px;font-size:12px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--text)}
+.picked h4 span{font-weight:500;letter-spacing:0;text-transform:none;color:var(--muted)}
+.fd .picked p{margin:0 0 6px}
+.fd .picked p:last-child{margin-bottom:0}
 .fd .btn{margin-top:20px}
 
 .overview{max-width:68ch;font-size:18px;margin-bottom:40px}

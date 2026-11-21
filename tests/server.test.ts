@@ -56,8 +56,8 @@ describe("buildServer", () => {
     expect(got.notes.map((n: { id: string; text: string }) => [n.id, n.text])).toEqual([["n2", "Pacing matters a lot"]]);
     expect(got.overview.text).toBe("You love spectacle.");
     expect(got.picks.items).toEqual([
-      { title: "Thief", year: 1981, imdbId: "tt0083190", why: "Pacing" },
-      { title: "Ran", year: null, imdbId: "tt0089881", why: "Epic" },
+      { title: "Thief", year: 1981, imdbId: "tt0083190", why: "Pacing", addedAt: expect.any(String) },
+      { title: "Ran", year: null, imdbId: "tt0089881", why: "Epic", addedAt: expect.any(String) },
     ]);
     // A new note never reuses a forgotten id.
     expect((await call("remember", { note: "x" })).body.id).toBe("n3");
@@ -89,7 +89,9 @@ describe("buildServer", () => {
 
     // Editing keeps the pick's place and changes only what's passed.
     await call("update_pick", { imdbId: "tt0083190", why: "a2" });
-    expect(memory.current.picks?.items[2]).toEqual({ title: "Thief", year: 1981, imdbId: "tt0083190", why: "a2" });
+    expect(memory.current.picks?.items[2]).toEqual({ title: "Thief", year: 1981, imdbId: "tt0083190", why: "a2", addedAt: expect.any(String) });
+    // A film they'd already watched was never on the list, so it isn't a past pick either.
+    expect(memory.current.pastPicks ?? []).toEqual([]);
     expect((await call("update_pick", { imdbId: "tt0083190" })).isError).toBe(true); // nothing to change
     expect((await call("update_pick", { imdbId: "tt0000001", why: "x" })).isError).toBe(true); // not on the list
 
@@ -99,14 +101,43 @@ describe("buildServer", () => {
     expect((await call("remove_picks", { imdbIds: ["tt0000001"] })).isError).toBe(true);
   });
 
-  it("get_memory leaves out picks the user has since watched, without deleting them from storage", async () => {
-    const heat = { title: "Heat", year: 1995, imdbId: "tt0113277", why: "watched since it was picked" };
+  it("get_memory moves picks the user has since watched to pastPicks, keeping their reasons", async () => {
+    const heat = { title: "Heat", year: 1995, imdbId: "tt0113277", why: "watched since it was picked", addedAt: "2026-11-02T10:00:00.000Z" };
     const thief = { title: "Thief", year: 1981, imdbId: "tt0083190", why: "still to watch" };
     const memory = inMemoryStore({ notes: [], overview: null, picks: { items: [heat, thief], updatedAt: "2026-11-01T00:00:00.000Z" } });
     const client = await connect(fixture(), memory);
     const got = JSON.parse(text(await client.callTool({ name: "get_memory", arguments: {} })));
     expect(got.picks.items).toEqual([thief]);
-    expect(memory.current.picks?.items).toEqual([heat, thief]);
+    expect(got.pastPicks).toBeUndefined(); // kept out of get_memory; they show up as pickedBecause instead
+    expect(memory.current.picks).toEqual({ items: [thief], updatedAt: "2026-11-01T00:00:00.000Z" });
+    expect(memory.current.pastPicks).toEqual([{ ...heat, movedAt: expect.any(String) }]);
+
+    // Its reason now comes with the film wherever Claude looks it up.
+    const call = async (name: string, args: Record<string, unknown>) => JSON.parse(text(await client.callTool({ name, arguments: args })));
+    const seen = await call("has_seen", { films: [{ title: "Heat", year: 1995 }, { title: "Se7en" }] });
+    expect(seen[0].matches[0]).toMatchObject({ name: "Heat", pickedBecause: "watched since it was picked", pickedOn: "2026-11-02" });
+    expect(seen[1].matches[0].pickedBecause).toBeUndefined();
+    const watchedFilms = (await call("get_watched", {})).items;
+    expect(watchedFilms.filter((f: { pickedBecause?: string }) => f.pickedBecause).map((f: { name: string }) => f.name)).toEqual(["Heat"]);
+
+    // Watching it again later, or a second get_memory, doesn't duplicate it.
+    await call("get_memory", {});
+    expect(memory.current.pastPicks).toHaveLength(1);
+  });
+
+  it("get_diary marks entries for films that were picks", async () => {
+    const memory = inMemoryStore({
+      notes: [],
+      overview: null,
+      picks: null,
+      pastPicks: [{ title: "Se7en", year: 1995, why: "tight thriller", movedAt: "2026-11-10T00:00:00.000Z" }],
+    });
+    const client = await connect(fixture(), memory);
+    const diary = JSON.parse(text(await client.callTool({ name: "get_diary", arguments: {} }))).items;
+    const se7en = diary.filter((e: { name: string }) => e.name === "Se7en");
+    expect(se7en.length).toBeGreaterThan(0);
+    for (const e of se7en) expect(e).toMatchObject({ pickedBecause: "tight thriller" });
+    expect(diary.find((x: { name: string }) => x.name !== "Se7en").pickedBecause).toBeUndefined();
   });
 
   it("notes carry a title, topic and example films; updates change only what's passed", async () => {

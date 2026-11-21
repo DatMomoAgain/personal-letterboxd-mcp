@@ -14,10 +14,12 @@ import {
 import {
   addNote,
   addPicks,
+  archiveWatched,
   type Memory,
   type MemoryStore,
   type NoteFields,
   type Pick,
+  pickReasonFinder,
   removeNote,
   removePicks,
   TOPICS,
@@ -88,6 +90,10 @@ export const INSTRUCTIONS = [
     "doesn't mean it was a bad pick. Don't drop or downgrade similar films, or rewrite their taste, because of one " +
     "miss; they're happy to watch more films like it.",
   "- Recent reviews are a few data points among 100+ ratings. Don't weigh them more than the rest.",
+  "",
+  "PAST PICKS: a film that was on their watch list carries pickedBecause (your reason for recommending it, with " +
+    "pickedOn when known) in has_seen, get_watched and get_diary. Compare it with their rating and review to learn " +
+    "what landed, but one miss doesn't mean the reasoning was wrong (see above).",
 ].join("\n");
 
 const rating = z.number().min(0.5).max(5);
@@ -163,7 +169,7 @@ const MAX_FIND_TITLES = 10;
 const MAX_SEEN_TITLES = 25;
 
 export function buildServer(data: Dataset | null, memory: MemoryStore, services: Services = {}): McpServer {
-  const server = new McpServer({ name: "letterboxd", version: "1.6.0" }, { instructions: INSTRUCTIONS });
+  const server = new McpServer({ name: "letterboxd", version: "1.7.0" }, { instructions: INSTRUCTIONS });
   const now = () => new Date().toISOString();
   const { tmdbToken, omdbKey, fetcher = fetch } = services;
   const ratingsStore: RatingsStore = services.ratingsStore ?? { load: async () => ({}), save: async () => {} };
@@ -172,13 +178,11 @@ export function buildServer(data: Dataset | null, memory: MemoryStore, services:
     const seen = data ? hasSeen(data, p.title, p.year ?? undefined) : null;
     return !!seen?.exactMatch && seen.matches.some((m) => m.watched);
   };
-  /** Saves memory with watched picks left out (the page hides them anyway), so the stored list is what the page shows. */
-  const savePicks = async (m: Memory): Promise<{ memory: Memory; dropped: Pick[] }> => {
-    const items = m.picks?.items ?? [];
-    const dropped = items.filter(watched);
-    const next = m.picks && dropped.length ? { ...m, picks: { ...m.picks, items: items.filter((p) => !dropped.includes(p)) } } : m;
+  /** Saves memory with watched picks moved to pastPicks (the page hides them anyway), so the list is what the page shows. */
+  const savePicks = async (m: Memory): Promise<Memory> => {
+    const { memory: next } = archiveWatched(m, watched, now());
     await memory.save(next);
-    return { memory: next, dropped };
+    return next;
   };
   const pickId = z.string().regex(IMDB_ID, 'An IMDb id like "tt1663202"');
   const pickWhy = z.string().trim().min(1).max(1000).describe("Why it suits them, in terms of their own taste");
@@ -191,15 +195,19 @@ export function buildServer(data: Dataset | null, memory: MemoryStore, services:
       title: "Taste memory",
       description:
         "Call this FIRST. Everything the user has told you about their film taste in earlier chats (notes with ids), " +
-        "your last written overview of their taste, and their watch list (the 'watch next' films they chose to watch, " +
-        "minus any they've since logged as watched).",
+        "your last written overview of their taste, and their watch list (the 'watch next' films they chose to watch " +
+        "and haven't watched yet). Films they've watched from the list show up as pickedBecause in has_seen, " +
+        "get_watched and get_diary instead.",
       inputSchema: {},
       annotations: readOnly,
     },
     async () => {
-      // Picks the user has since watched stay in storage (the page hides them too) but aren't shown as still to watch.
-      const m = await memory.load();
-      return json(m.picks ? { ...m, picks: { ...m.picks, items: m.picks.items.filter((p) => !watched(p)) } } : m);
+      // Housekeeping, not a change the user makes: picks they've since watched move to pastPicks with their reasons.
+      const loaded = await memory.load();
+      const { memory: m, moved } = archiveWatched(loaded, watched, now());
+      if (moved.length) await memory.save(m);
+      const { pastPicks: _, ...shown } = m;
+      return json(shown);
     },
   );
 
@@ -376,8 +384,11 @@ export function buildServer(data: Dataset | null, memory: MemoryStore, services:
             "Look them up with find_film and save again.",
         );
       }
-      const items: Pick[] = picks.map((p) => ({ title: p.title, year: p.year ?? null, imdbId: p.imdbId, why: p.why }));
-      const { memory: saved, dropped } = await savePicks(addPicks(await memory.load(), items, now()));
+      const at = now();
+      const items: Pick[] = picks.map((p) => ({ title: p.title, year: p.year ?? null, imdbId: p.imdbId, why: p.why, addedAt: at }));
+      // Films they've already watched never go on the list (so they don't land in pastPicks either).
+      const leftOut = items.filter(watched);
+      const saved = await savePicks(addPicks(await memory.load(), items.filter((p) => !leftOut.includes(p)), at));
 
       // Keep the scores just fetched, so the page doesn't look the same films up again.
       if (checked?.some((r) => r.status === "fulfilled")) {
@@ -390,9 +401,9 @@ export function buildServer(data: Dataset | null, memory: MemoryStore, services:
         if (changed) await ratingsStore.save(cache);
       }
       return json({
-        saved: items.length - dropped.filter((d) => items.includes(d)).length,
+        saved: items.length - leftOut.length,
         onList: saved.picks?.items.length ?? 0,
-        ...(dropped.length > 0 && { leftOutAlreadyWatched: dropped.map((p) => `${p.title}${p.year ? ` (${p.year})` : ""}`) }),
+        ...(leftOut.length > 0 && { leftOutAlreadyWatched: leftOut.map((p) => `${p.title}${p.year ? ` (${p.year})` : ""}`) }),
         check: "Make sure each id is the film you meant; if not, remove it with remove_picks and save the right id.",
         picks: picks.map((p, i) => {
           const r = checked?.[i];
@@ -443,7 +454,7 @@ export function buildServer(data: Dataset | null, memory: MemoryStore, services:
       const onList = new Set((current.picks?.items ?? []).flatMap((p) => (p.imdbId ? [p.imdbId] : [])));
       const notOnList = imdbIds.filter((id) => !onList.has(id));
       if (notOnList.length === imdbIds.length) return fail(`None of these are on the list: ${notOnList.join(", ")}. Call get_memory to see the picks.`);
-      const { memory: saved } = await savePicks(removePicks(current, imdbIds, now()));
+      const saved = await savePicks(removePicks(current, imdbIds, now()));
       return json({
         removed: imdbIds.filter((id) => onList.has(id)),
         ...(notOnList.length > 0 && { notOnList }),
@@ -461,6 +472,15 @@ export function buildServer(data: Dataset | null, memory: MemoryStore, services:
       if (!data) return { isError: true, content: [{ type: "text" as const, text: NO_DATA_MESSAGE }] };
       return { content: [{ type: "text" as const, text: JSON.stringify(fn(data, args), null, 2) }] };
     };
+
+  /** Adds pickedBecause (and pickedOn, when known) to a film that was one of Claude's picks. */
+  const withReasons = async () => {
+    const find = pickReasonFinder(await memory.load());
+    return <F extends { name: string; year: number | null }>(f: F) => {
+      const r = find(f);
+      return r ? { ...f, pickedBecause: r.why, ...(r.addedAt && { pickedOn: r.addedAt.slice(0, 10) }) } : f;
+    };
+  };
 
   server.registerTool(
     "get_taste_summary",
@@ -483,7 +503,7 @@ export function buildServer(data: Dataset | null, memory: MemoryStore, services:
         "Returns one result per film, in order, each with every matching film's watched status, star rating, diary dates, " +
         "watchlist and liked flags, and the user's written reviews of it. Empty matches means the user has no record of " +
         "it. If exactMatch is false, the matches are only partial title matches (other films), so do not assume the " +
-        "user has seen the film you asked about.",
+        "user has seen the film you asked about. A film that was one of your picks carries pickedBecause.",
       inputSchema: {
         films: z
           .array(
@@ -497,7 +517,10 @@ export function buildServer(data: Dataset | null, memory: MemoryStore, services:
       },
       annotations: readOnly,
     },
-    answer((d, a: { films: { title: string; year?: number }[] }) => hasSeenAll(d, a.films)),
+    async (a: { films: { title: string; year?: number }[] }) => {
+      const reason = await withReasons();
+      return answer((d, b: typeof a) => hasSeenAll(d, b.films).map((r) => ({ ...r, matches: r.matches.map(reason) })))(a);
+    },
   );
 
   server.registerTool(
@@ -508,7 +531,8 @@ export function buildServer(data: Dataset | null, memory: MemoryStore, services:
         "Every film the user has watched, rated or not, newest watch first by default. Each has its star rating " +
         "(null if unrated), liked and watchlist flags, diary dates, lastDate (latest watch) and the user's reviews, " +
         `cut to ${WATCHED_REVIEW_CHARS} characters (get_reviews has the full text). rated: true for only rated films, ` +
-        "false for only unrated ones. A rating filter leaves out unrated films; unrated films sort last.",
+        "false for only unrated ones. A rating filter leaves out unrated films; unrated films sort last. " +
+        "Films that were your picks carry pickedBecause.",
       inputSchema: {
         rated: z.boolean().optional().describe("true: only rated films; false: only unrated ones"),
         minRating: rating.optional(),
@@ -520,7 +544,13 @@ export function buildServer(data: Dataset | null, memory: MemoryStore, services:
       },
       annotations: readOnly,
     },
-    answer(getWatched),
+    async (a: Parameters<typeof getWatched>[1]) => {
+      const reason = await withReasons();
+      return answer((d, b: typeof a) => {
+        const page = getWatched(d, b);
+        return { ...page, items: page.items.map(reason) };
+      })(a);
+    },
   );
 
   server.registerTool(
@@ -528,11 +558,18 @@ export function buildServer(data: Dataset | null, memory: MemoryStore, services:
     {
       title: "Diary entries",
       description:
-        "Films the user logged with a watch date, newest first, optionally within a date range. Entries the user wrote about include their review text.",
+        "Films the user logged with a watch date, newest first, optionally within a date range. Entries the user wrote about include their review text, " +
+        "and films that were your picks carry pickedBecause.",
       inputSchema: { from: day.optional(), to: day.optional(), ...paging },
       annotations: readOnly,
     },
-    answer(getDiary),
+    async (a: Parameters<typeof getDiary>[1]) => {
+      const reason = await withReasons();
+      return answer((d, b: typeof a) => {
+        const page = getDiary(d, b);
+        return { ...page, items: page.items.map(reason) };
+      })(a);
+    },
   );
 
   server.registerTool(

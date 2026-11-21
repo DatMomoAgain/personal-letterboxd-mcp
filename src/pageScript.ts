@@ -122,6 +122,7 @@ if (wall) {
       y: Number(a.dataset.y) || 0,
       liked: a.dataset.l === "1",
       reviewed: a.dataset.v === "1",
+      picked: a.dataset.p === "1",
     };
   });
   const q = $("#q"), rating = $("#rating"), decade = $("#decade"), sort = $("#sort");
@@ -146,6 +147,7 @@ if (wall) {
           (!needle || x.t.includes(needle)) &&
           (state.flag !== "liked" || x.liked) &&
           (state.flag !== "reviewed" || x.reviewed) &&
+          (state.flag !== "picked" || x.picked) &&
           (!state.rating || x.r === Number(state.rating)) &&
           (!state.decade || Math.floor(x.y / 10) * 10 === Number(state.decade)),
       )

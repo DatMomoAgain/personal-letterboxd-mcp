@@ -29,6 +29,12 @@ const env = (kv: ReturnType<typeof fakeKv>) => ({ MCP_TOKEN: TOKEN, LETTERBOXD: 
 const render = (data: Dataset | null, memory: Memory = emptyMemory(), status: "ok" | null = null) =>
   renderPage(data, memory, { uploadAction: "/home/x/upload", status, now: NOW });
 
+/** One view's HTML (views don't nest, so the next </section> closes it). */
+const section = (html: string, id: string) => {
+  const start = html.indexOf(`<section class="view" id="${id}">`);
+  return start < 0 ? "" : html.slice(start, html.indexOf("</section>", start));
+};
+
 describe("renderPage", () => {
   it("escapes everything user- or Claude-written", () => {
     const d = fixture();
@@ -56,7 +62,9 @@ describe("renderPage", () => {
       },
     };
     const html = render(fixture(), memory);
-    expect(html).not.toContain("already seen");
+    // The watched pick leaves Watch next; its reason moves to the film's panel on the Films wall.
+    expect(section(html, "watch")).not.toContain("already seen");
+    expect(section(html, "films")).toMatch(/<h4>Why Claude picked it<\/h4><p>already seen<\/p>/);
     expect(html).toMatch(/<h2>The Wailing<\/h2>\s*<p class="pick-meta">2016 <span class="badge">on your watchlist/);
     expect(html).toContain("epic battles");
     expect(html).toContain("2 films on your list, updated Nov 14");
@@ -80,7 +88,7 @@ describe("renderPage", () => {
       },
     };
     const html = render(fixture(), memory);
-    expect(html).not.toContain("seen, Letterboxd says 1995");
+    expect(section(html, "watch")).not.toContain("seen, Letterboxd says 1995");
     expect(html).toContain('href="https://letterboxd.com/imdb/tt0089881/"');
     expect(html).toContain('href="https://letterboxd.com/search/films/Old%20pick/"');
   });
@@ -88,6 +96,24 @@ describe("renderPage", () => {
   it("all picks watched → friendly empty state", () => {
     const memory: Memory = { ...emptyMemory(), picks: { updatedAt: "2026-11-14", items: [{ title: "Heat", year: 1995, why: "x" }] } };
     expect(render(fixture(), memory)).toContain("You've watched everything on your list");
+  });
+
+  it("films wall: a heart on every liked film; past picks show Claude's reason and turn on the Picks filter", () => {
+    const plain = render(fixture());
+    const films = section(plain, "films");
+    expect(films.match(/<span class="heart" title="Liked">♥<\/span>/g)?.length).toBe(films.match(/data-l="1"/g)?.length);
+    expect(films).not.toContain('data-flag="picked"'); // no picks yet, no filter
+    expect(films).not.toContain('data-p="1"');
+
+    const memory: Memory = {
+      ...emptyMemory(),
+      pastPicks: [{ title: "Heat", year: 1995, imdbId: "tt0113277", why: "Mann at his peak", addedAt: "2026-11-02T10:00:00Z", movedAt: "2026-11-10T00:00:00Z" }],
+    };
+    const html = section(render(fixture(), memory), "films");
+    expect(html).toContain('data-flag="picked"');
+    expect(html).toMatch(/data-t="heat"[^>]*data-p="1"/);
+    expect(html.match(/data-p="1"/g)).toHaveLength(1);
+    expect(html).toContain("<h4>Why Claude picked it <span>· Nov 2</span></h4><p>Mann at his peak</p>");
   });
 
   it("films wall: every watched film, newest first, with rating, watch dates and review", () => {

@@ -1,5 +1,6 @@
 // Taste memory: what Claude has learned about the user in chats, kept in their own
 // Cloudflare KV (key "memory") instead of Claude's built-in memory.
+import { normalizeTitle } from "./queries.ts";
 
 /** The sections the Taste page groups notes into, in page order. */
 export const TOPICS = {
@@ -59,6 +60,14 @@ export interface Pick {
   imdbId?: string;
   /** Why this suits the user, in terms of their own taste. */
   why: string;
+  /** When it was saved to the list. Picks saved before 2026-11-22 have none. */
+  addedAt?: string;
+}
+
+/** A pick the user has since watched, kept so its reason can be compared with how it landed. */
+export interface PastPick extends Pick {
+  /** When it left the watch list (the first time the server noticed it had been watched). */
+  movedAt: string;
 }
 
 export interface Memory {
@@ -67,6 +76,8 @@ export interface Memory {
   overview: { text: string; updatedAt: string } | null;
   /** Claude's "watch next" recommendations, shown on their page: newest saves first. */
   picks: { items: Pick[]; updatedAt: string } | null;
+  /** Picks the user has watched, most recently moved first. Missing in memory saved before 2026-11-22. */
+  pastPicks?: PastPick[];
 }
 
 /** Load/save seam: KV in the Worker, a plain variable in tests. */
@@ -77,7 +88,7 @@ export interface MemoryStore {
 
 export const MEMORY_KEY = "memory";
 
-export const emptyMemory = (): Memory => ({ notes: [], overview: null, picks: null });
+export const emptyMemory = (): Memory => ({ notes: [], overview: null, picks: null, pastPicks: [] });
 
 /** Tolerates a missing or partly-shaped stored value. */
 export function normalizeMemory(raw: unknown): Memory {
@@ -87,6 +98,7 @@ export function normalizeMemory(raw: unknown): Memory {
     notes: Array.isArray(m.notes) ? m.notes : [],
     overview: m.overview ?? null,
     picks: m.picks ?? null,
+    pastPicks: Array.isArray(m.pastPicks) ? m.pastPicks : [],
   };
 }
 
@@ -159,4 +171,55 @@ export function updatePick(m: Memory, imdbId: string, edit: Partial<Omit<Pick, "
 export function removePicks(m: Memory, imdbIds: string[], now: string): Memory {
   const drop = new Set(imdbIds);
   return withPicks(m, (m.picks?.items ?? []).filter((p) => !(p.imdbId && drop.has(p.imdbId))), now);
+}
+
+const sameFilm = (a: Pick, b: Pick) =>
+  a.imdbId && b.imdbId ? a.imdbId === b.imdbId : normalizeTitle(a.title) === normalizeTitle(b.title) && a.year === b.year;
+
+/**
+ * Moves the picks `isWatched` says the user has watched off the list and into pastPicks (newest first),
+ * keeping their reasons. A film already in pastPicks is replaced by the newer entry.
+ * `moved` holds the original pick objects. The list's updatedAt is left alone: the user didn't change it.
+ */
+export function archiveWatched(m: Memory, isWatched: (p: Pick) => boolean, now: string): { memory: Memory; moved: Pick[] } {
+  const items = m.picks?.items ?? [];
+  const moved = items.filter(isWatched);
+  if (!moved.length || !m.picks) return { memory: m, moved: [] };
+  const past = (m.pastPicks ?? []).filter((old) => !moved.some((p) => sameFilm(p, old)));
+  return {
+    memory: {
+      ...m,
+      picks: { ...m.picks, items: items.filter((p) => !moved.includes(p)) },
+      pastPicks: [...moved.map((p) => ({ ...p, movedAt: now })), ...past],
+    },
+    moved,
+  };
+}
+
+export interface PickReason {
+  why: string;
+  addedAt?: string;
+  /** true while it's still on the watch list (not yet moved to pastPicks). */
+  onList?: true;
+}
+
+/**
+ * Finds why Claude picked a film, by title and release year (one off either way, as has_seen allows),
+ * from the watch list and past picks. Films that were never picked get undefined.
+ */
+export function pickReasonFinder(m: Memory): (film: { name: string; year: number | null }) => PickReason | undefined {
+  const byTitle = new Map<string, (Pick & { onList?: true })[]>();
+  const add = (p: Pick & { onList?: true }) => {
+    const k = normalizeTitle(p.title);
+    byTitle.set(k, [...(byTitle.get(k) ?? []), p]);
+  };
+  for (const p of m.picks?.items ?? []) add({ ...p, onList: true });
+  for (const p of m.pastPicks ?? []) add(p);
+  return (film) => {
+    const hit = byTitle
+      .get(normalizeTitle(film.name))
+      ?.find((p) => p.year === null || film.year === null || Math.abs(p.year - film.year) <= 1);
+    if (!hit) return undefined;
+    return { why: hit.why, ...(hit.addedAt && { addedAt: hit.addedAt }), ...(hit.onList && { onList: true as const }) };
+  };
 }
