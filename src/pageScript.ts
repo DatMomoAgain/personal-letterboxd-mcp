@@ -201,6 +201,7 @@ if (wall) {
     const tpl = x && $("template", x.li);
     if (!tpl) return;
     open = n;
+    dlg.dataset.from = "wall";
     body.replaceChildren(tpl.content.cloneNode(true));
     if (!dlg.open) dlg.showModal();
   }
@@ -211,11 +212,26 @@ if (wall) {
     openFilm(visible.findIndex((x) => x.a === a));
   });
   dlg.addEventListener("keydown", (e) => {
+    if (dlg.dataset.from !== "wall") return; // a title from the sections below the wall: no stepping
     if (e.key === "ArrowRight" && open < visible.length - 1) openFilm(open + 1);
     if (e.key === "ArrowLeft" && open > 0) openFilm(open - 1);
   });
   set({});
 }
+
+// ---- titles not logged on Letterboxd (under the wall): open one --------
+$$(".tiles").forEach((list) =>
+  list.addEventListener("click", (e) => {
+    const a = e.target.closest("a.film");
+    const dlg = $("#film");
+    const tpl = a && $("template", a.parentElement);
+    if (!tpl || !dlg.showModal || e.metaKey || e.ctrlKey || e.shiftKey) return;
+    e.preventDefault();
+    dlg.dataset.from = "tiles";
+    $(".film-body", dlg).replaceChildren(tpl.content.cloneNode(true));
+    if (!dlg.open) dlg.showModal();
+  }),
+);
 
 // ---- upload: show the chosen file's name -------------------------------
 const file = $(".file input"), fileName = $(".file span");

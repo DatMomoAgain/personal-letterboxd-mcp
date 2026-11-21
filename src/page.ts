@@ -1,11 +1,11 @@
 // The user's personal page: three views (Watch next, Films, Taste) rendered on the server.
 // A small inline script (pageScript.ts) switches views and filters; without it the page
 // is one long document with everything visible.
-import { type Example, type Memory, type Note, type PickReason, pickReasonFinder, TOPICS } from "./memory.ts";
+import { type Example, type Memory, type Note, type PickReason, pickReasonFinder, type TitleRecord, titleFinder, TOPICS } from "./memory.ts";
 import { PAGE_SCRIPT } from "./pageScript.ts";
 import { type FilmRef, filmKey, type Posters, posterUrl } from "./posters.ts";
 import type { Ratings } from "./ratings.ts";
-import { getFilms, getTasteSummary, hasSeen, type WatchedFilm } from "./queries.ts";
+import { getFilms, getTasteSummary, hasSeen, loggedFilmFinder, type WatchedFilm } from "./queries.ts";
 import type { Dataset } from "./types.ts";
 
 export type UploadStatus = "ok" | "no-file" | "too-big" | "bad-zip" | "not-export";
@@ -113,10 +113,34 @@ export function pickIdsShown(data: Dataset | null, memory: Memory): string[] {
   return pendingPicks(data, memory).flatMap((p) => (p.imdbId ? [p.imdbId] : []));
 }
 
-/** Every film the page will show (picks, then films newest first, then taste examples), so posters can be fetched for those. */
+type Rec = TitleRecord & { imdbId: string };
+
+/**
+ * Title records that aren't logged on Letterboxd, for the two sections under the wall. Each title shows in one place:
+ * logged films are on the wall; then don't-recommend (newest first); then titles with only a Claude note, leaving out
+ * picks still on Watch next (their note shows there).
+ */
+function unloggedTitles(data: Dataset | null, memory: Memory): { dont: Rec[]; noted: Rec[] } {
+  const logged = loggedFilmFinder(data);
+  const onWatchNext = new Set(pendingPicks(data, memory).flatMap((p) => (p.imdbId ? [p.imdbId] : [])));
+  const all = Object.entries(memory.titles ?? {})
+    .map(([imdbId, r]) => ({ ...r, imdbId }))
+    .filter((r) => !logged(r));
+  return {
+    dont: all.filter((r) => r.dontRecommend).sort((a, b) => b.dontRecommend!.addedAt.localeCompare(a.dontRecommend!.addedAt)),
+    noted: all
+      .filter((r) => !r.dontRecommend && r.note && !onWatchNext.has(r.imdbId))
+      .sort((a, b) => b.note!.updatedAt.localeCompare(a.note!.updatedAt)),
+  };
+}
+
+const recRef = (r: Rec): FilmRef => ({ title: r.title, year: r.year, imdbId: r.imdbId });
+
+/** Every film the page will show (picks, then films newest first, then unlogged titles, then taste examples), so posters can be fetched for those. */
 export function filmsShown(data: Dataset | null, memory: Memory): FilmRef[] {
   const films = data ? getFilms(data).map((f) => ({ title: f.name, year: f.year })) : [];
-  const all = [...picksShown(data, memory), ...films, ...exampleFilms(memory)];
+  const { dont, noted } = unloggedTitles(data, memory);
+  const all = [...picksShown(data, memory), ...films, ...[...dont, ...noted].map(recRef), ...exampleFilms(memory)];
   const seen = new Set<string>();
   return all.filter((f) => !seen.has(filmKey(f)) && seen.add(filmKey(f)));
 }
@@ -134,9 +158,11 @@ function watchView(data: Dataset | null, memory: Memory, at: Stamp, posters?: Po
   }
   const path = (p: FilmRef) => posters?.get(filmKey(p));
   const first = path(pending[0]);
+  const recordFor = titleFinder(memory);
   const panels = pending
     .map((p, i) => {
       const bg = path(p);
+      const note = recordFor({ name: p.title, year: p.year, imdbId: p.imdbId })?.note;
       return `<article class="pick${bg ? "" : " no-poster"}"${bg ? ` data-bg="${esc(posterUrl(bg, 92))}"` : ""}>
         ${bg ? `<div class="pick-poster">${tile(posters, p, 342, i > 0)}</div>` : ""}
         <div class="pick-body">
@@ -144,6 +170,7 @@ function watchView(data: Dataset | null, memory: Memory, at: Stamp, posters?: Po
           <p class="pick-meta">${p.year ?? ""}${p.onWatchlist ? ' <span class="badge">on your watchlist</span>' : ""}</p>
           ${scores(ratings, p)}
           <p class="why">${esc(p.why)}</p>
+          ${note ? `<div class="picked told">${noteBox(note, (iso) => at(iso))}</div>` : ""}
           <a class="btn" href="${esc(p.imdbId ? letterboxdByImdb(p.imdbId) : letterboxdSearch(p.title))}" ${EXT}>Open on Letterboxd</a>
         </div>
       </article>`;
@@ -169,7 +196,24 @@ function watchView(data: Dataset | null, memory: Memory, at: Stamp, posters?: Po
 
 // ---------- Films ----------
 
-function filmDetail(f: WatchedFilm, now: Date, posters?: Posters, reason?: PickReason): string {
+/** The inside of a "What you told Claude" box. */
+const noteBox = (note: { text: string; updatedAt: string }, date: (iso: string) => string) =>
+  `<h4>What you told Claude <span>· ${date(note.updatedAt)}</span></h4>${paragraphs(note.text)}`;
+
+/** A record's don't-recommend reason and Claude note, as boxes in a detail panel. */
+function recordBoxes(r: TitleRecord | undefined, now: Date): string {
+  if (!r) return "";
+  const date = (iso: string) => day(iso, now);
+  return [
+    r.dontRecommend &&
+      `<div class="picked dont"><h4>Don't recommend <span>· ${date(r.dontRecommend.addedAt)}</span></h4>${paragraphs(r.dontRecommend.reason)}</div>`,
+    r.note && `<div class="picked told">${noteBox(r.note, date)}</div>`,
+  ]
+    .filter(Boolean)
+    .join("");
+}
+
+function filmDetail(f: WatchedFilm, now: Date, posters?: Posters, reason?: PickReason, record?: TitleRecord): string {
   const ref = { title: f.name, year: f.year };
   const has = posters?.has(filmKey(ref));
   const dates = f.diaryDates.map((d) => day(d, now));
@@ -182,9 +226,42 @@ function filmDetail(f: WatchedFilm, now: Date, posters?: Posters, reason?: PickR
       ${dates.length ? `<p class="muted">Watched ${dates.join(", ")}</p>` : ""}
       ${f.reviews.map((r) => `<blockquote>${paragraphs(r.review)}</blockquote>`).join("")}
       ${reason ? `<div class="picked"><h4>Why Claude picked it${reason.addedAt ? ` <span>· ${day(reason.addedAt, now)}</span>` : ""}</h4>${paragraphs(reason.why)}</div>` : ""}
+      ${recordBoxes(record, now)}
       <a class="btn" href="${esc(f.uri || letterboxdSearch(f.name))}" ${EXT}>Open on Letterboxd</a>
     </div>
   </div>`;
+}
+
+/** The detail panel of a title that isn't logged on Letterboxd. */
+function titleDetail(r: Rec, now: Date, posters?: Posters): string {
+  const has = posters?.has(filmKey(recRef(r)));
+  return `<div class="fd${has ? "" : " no-poster"}">
+    ${has ? tile(posters, recRef(r), 185, false) : ""}
+    <div>
+      <h3>${esc(r.title)}</h3>
+      <p class="muted">${r.year ?? ""}${r.year ? " · " : ""}Not logged on Letterboxd</p>
+      ${recordBoxes(r, now)}
+      <a class="btn" href="${esc(letterboxdByImdb(r.imdbId))}" ${EXT}>Open on Letterboxd</a>
+    </div>
+  </div>`;
+}
+
+/** A section of unlogged title tiles under the wall; empty when there are none. */
+function titleTiles(list: Rec[], heading: string, fine: string, cls: string, now: Date, posters?: Posters): string {
+  if (!list.length) return "";
+  const items = list
+    .map((r) => {
+      const label = `${r.title}${r.year ? ` (${r.year})` : ""}`;
+      return `<li><a class="film" href="${esc(letterboxdByImdb(r.imdbId))}" ${EXT} title="${esc(label)}" aria-label="${esc(label)}">
+        ${tile(posters, recRef(r), 185)}
+        <span class="film-cap">${esc(r.title)}</span>
+      </a><template>${titleDetail(r, now, posters)}</template></li>`;
+    })
+    .join("");
+  return `<div class="extra">
+      <div class="head"><h2>${heading} <span class="num">${list.length}</span></h2><p class="fine">${fine}</p></div>
+      <ul class="tiles ${cls}">${items}</ul>
+    </div>`;
 }
 
 function filmsView(data: Dataset, memory: Memory, now: Date, posters?: Posters): string {
@@ -193,17 +270,20 @@ function filmsView(data: Dataset, memory: Memory, now: Date, posters?: Posters):
   const ratingSteps = [...new Set(films.flatMap((f) => (f.rating === null ? [] : [f.rating])))].sort((a, b) => b - a);
   const decades = [...new Set(films.flatMap((f) => (f.year ? [Math.floor(f.year / 10) * 10] : [])))].sort((a, b) => b - a);
   const reasonFor = pickReasonFinder(memory);
+  const recordFor = titleFinder(memory);
+  const unlogged = unloggedTitles(data, memory);
   let picked = 0;
   const wall = films
     .map((f) => {
       const label = `${f.name}${f.year ? ` (${f.year})` : ""}`;
       const reason = reasonFor(f);
+      const record = recordFor(f);
       if (reason) picked++;
       return `<li><a class="film" href="${esc(f.uri || letterboxdSearch(f.name))}" ${EXT} title="${esc(label)}" aria-label="${esc(label)}"
         data-t="${esc(fold(f.name))}" data-r="${f.rating ?? ""}" data-y="${f.year ?? ""}" data-l="${f.liked ? 1 : 0}" data-v="${f.reviews.length ? 1 : 0}" data-p="${reason ? 1 : 0}">
         ${tile(posters, { title: f.name, year: f.year }, 185)}
         <span class="film-stars">${stars(f.rating)}${f.liked ? '<span class="heart" title="Liked">♥</span>' : ""}${f.reviews.length ? '<span class="dot" title="Reviewed"></span>' : ""}</span>
-      </a><template>${filmDetail(f, now, posters, reason)}</template></li>`;
+      </a><template>${filmDetail(f, now, posters, reason, record)}</template></li>`;
     })
     .join("");
   return `<section class="view" id="films">
@@ -234,25 +314,9 @@ function filmsView(data: Dataset, memory: Memory, now: Date, posters?: Posters):
     <ul class="wall">${wall}</ul>
     <p class="nomatch" hidden>No films match.</p>
     <button type="button" class="more btn quiet" hidden>Show more</button>
-    ${dontRecommendBlock(memory)}
+    ${titleTiles(unlogged.dont, "Don't recommend", "Not logged on Letterboxd. Claude won't suggest these; to change that, tell Claude in a chat.", "dim", now, posters)}
+    ${titleTiles(unlogged.noted, "Not logged", "Titles you've talked about with Claude that aren't on Letterboxd.", "", now, posters)}
   </section>`;
-}
-
-/** The don't-recommend list, below the wall: one row per title with the user's reason. Nothing when it's empty. */
-function dontRecommendBlock(memory: Memory): string {
-  const list = memory.dontRecommend ?? [];
-  if (!list.length) return "";
-  const rows = list
-    .map(
-      (e) => `<li><a href="${esc(letterboxdByImdb(e.imdbId))}" ${EXT}><span class="dr-title">${esc(e.title)}</span>${
-        e.year ? ` <span class="muted num">${e.year}</span>` : ""
-      }</a><span class="dr-why">${esc(e.reason)}</span></li>`,
-    )
-    .join("");
-  return `<div class="dont-rec">
-      <div class="head"><h2>Don't recommend</h2><p class="fine">Claude won't suggest these. To change the list, tell Claude in a chat.</p></div>
-      <ul>${rows}</ul>
-    </div>`;
 }
 
 // ---------- Taste ----------
@@ -555,7 +619,7 @@ html:not(.js) .tools{display:none}
 .seg button{border:0;background:none;border-radius:7px;padding:0 13px;font-size:14px;font-weight:500;color:var(--muted);cursor:pointer}
 .seg button[aria-pressed=true]{background:var(--accent);color:var(--on-accent)}
 #films .fine{display:flex;gap:14px;align-items:center;margin-bottom:16px;min-height:22px}
-.wall{list-style:none;margin:0;padding:0;display:grid;grid-template-columns:repeat(auto-fill,minmax(118px,1fr));gap:20px 14px}
+.wall,.tiles{list-style:none;margin:0;padding:0;display:grid;grid-template-columns:repeat(auto-fill,minmax(118px,1fr));gap:20px 14px}
 .film{display:block;text-decoration:none}
 .film .poster{transition:transform .15s}
 .film:hover .poster{transform:translateY(-4px);outline:2px solid var(--accent);outline-offset:2px}
@@ -564,15 +628,16 @@ html:not(.js) .tools{display:none}
 .heart{color:var(--heart);font-size:13px;letter-spacing:0;line-height:1}
 .nomatch{padding:48px 0;color:var(--muted)}
 .more{display:flex;margin:28px auto 0}
-.dont-rec{margin-top:56px}
-.dont-rec ul{list-style:none;margin:0;padding:0;background:var(--surface);border-radius:16px}
-.dont-rec li{display:grid;grid-template-columns:minmax(0,2fr) minmax(0,3fr);gap:4px 24px;align-items:baseline;padding:14px 22px}
-.dont-rec li+li{border-top:1px solid var(--line)}
-.dont-rec a{text-decoration:none}
-.dont-rec a:hover .dr-title{text-decoration:underline;text-underline-offset:3px}
-#films .dont-rec .fine{display:block;margin:0;min-height:0}
-.dr-title{font-weight:600}
-.dr-why{color:var(--muted);font-size:15px}
+.extra{margin-top:56px;padding-top:28px;border-top:1px solid var(--line)}
+.extra .head h2 .num{font:500 15px/1 var(--body);color:var(--muted);margin-left:6px}
+#films .extra .fine{display:block;margin:0;min-height:0}
+.film-cap{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;margin-top:6px;font-size:12px;font-weight:600;line-height:1.25}
+.tiles.dim .poster{opacity:.38;filter:grayscale(1)}
+.tiles.dim .film:hover .poster{opacity:.75}
+.tiles.dim .film-cap{color:var(--muted);text-decoration:line-through;text-decoration-color:color-mix(in srgb,var(--muted) 60%,transparent)}
+.picked.dont{border-left:3px solid var(--err)}
+.picked.told{border-left:3px solid var(--accent)}
+.pick .picked{max-width:54ch;margin:-8px 0 26px}
 
 dialog{border:0;border-radius:20px;padding:28px;background:var(--surface);color:var(--text);width:min(680px,calc(100vw - 32px));max-height:calc(100vh - 48px);box-shadow:0 40px 80px -20px rgba(0,0,0,.6)}
 dialog::backdrop{background:rgba(8,9,12,.62);backdrop-filter:blur(3px)}
@@ -672,7 +737,7 @@ dialog .close{display:block;margin:22px 0 0 auto}
   .see-all{width:64px}
   .picks-nav.open{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:16px 10px}
   .picks-nav.open .see-all{width:auto}
-  .wall{grid-template-columns:repeat(auto-fill,minmax(92px,1fr));gap:16px 10px}
+  .wall,.tiles{grid-template-columns:repeat(auto-fill,minmax(92px,1fr));gap:16px 10px}
   .tools select{flex:1 1 30%;min-width:0}
   .seg{flex:1 1 100%}
   .seg button{flex:1;height:32px}
@@ -684,8 +749,7 @@ dialog .close{display:block;margin:22px 0 0 auto}
   .examples{display:flex;flex-wrap:wrap;margin-top:16px}
   .ex a{max-width:260px}
   .topic[open]{padding-bottom:20px}
-  .dont-rec{margin-top:40px}
-  .dont-rec li{grid-template-columns:1fr;padding:12px 18px}
+  .extra{margin-top:40px;padding-top:20px}
   .fd{grid-template-columns:96px minmax(0,1fr);gap:16px}
   .fd h3{font-size:30px}
   dialog{padding:22px}

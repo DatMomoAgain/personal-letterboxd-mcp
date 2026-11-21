@@ -2,13 +2,13 @@ import { describe, expect, it } from "vitest";
 import {
   MAX_LIMIT,
   WATCHED_REVIEW_CHARS,
-  getDiary,
   getReviews,
   getTasteSummary,
   getWatched,
   getWatchlist,
   hasSeen,
   hasSeenAll,
+  loggedFilmFinder,
   normalizeTitle,
 } from "../src/queries.ts";
 import { fixture } from "./fixture.ts";
@@ -67,14 +67,27 @@ describe("getWatched", () => {
   });
 });
 
-describe("getDiary / getWatchlist / getReviews", () => {
-  it("getDiary filters by date range on watchedDate", () => {
-    const page = getDiary(fixture(), { from: "2025-09-01", to: "2025-10-31" });
-    expect(page.items.map((e) => e.name)).toEqual(["Paddington 2", "Se7en"]);
+describe("getWatched date range / loggedFilmFinder", () => {
+  it("getWatched keeps films watched in a date range (diary dates, else the day marked watched)", () => {
+    expect(names(getWatched(fixture(), { watchedFrom: "2025-09-01", watchedTo: "2025-10-31" }).items)).toEqual(["Paddington 2", "Se7en"]);
     // Cats has no watchedDate, so its log date 2025-11-01 is used.
-    expect(getDiary(fixture(), { from: "2025-11-01" }).items.map((e) => e.name)).toEqual(["Cats"]);
+    expect(names(getWatched(fixture(), { watchedFrom: "2025-11-01" }).items)).toEqual(["Cats"]);
+    expect(names(getWatched(fixture(), { watchedTo: "2025-08-17" }).items)).toContain("Heat");
   });
 
+  it("loggedFilmFinder matches a stored title by Letterboxd link, else by title and a year one off", () => {
+    const find = loggedFilmFinder(fixture());
+    expect(find({ title: "se7en", year: 1996 })?.name).toBe("Se7en");
+    expect(find({ title: "Se7en", year: 1997 })).toBeUndefined();
+    expect(find({ title: "Suspiria", year: 2019 })?.year).toBe(2018); // closest year
+    const heat = find({ title: "Heat", year: 1995 })!;
+    expect(find({ title: "Something else entirely", year: null, letterboxdUri: heat.uri })?.name).toBe("Heat");
+    expect(find({ title: "The Wailing", year: 2016 })).toBeUndefined(); // only on the watchlist, not watched
+    expect(loggedFilmFinder(null)({ title: "Heat", year: 1995 })).toBeUndefined();
+  });
+});
+
+describe("getWatchlist / getReviews", () => {
   it("getWatchlist returns watchlist films", () => {
     expect(getWatchlist(fixture(), {}).items.map((f) => f.name)).toEqual(["The Wailing"]);
   });
@@ -102,17 +115,6 @@ describe("getDiary / getWatchlist / getReviews", () => {
     expect(getReviews(d, { title: "paddington" }).items.map((r) => r.name)).toEqual(["Paddington 2"]);
     expect(getReviews(d, { maxRating: 2 }).items.map((r) => r.name)).toEqual(["Cats"]);
     expect(getReviews(d, { limit: 1, offset: 1 }).items.map((r) => r.name)).toEqual(["Paddington 2"]);
-  });
-
-  it("getDiary attaches the review text to its entry", () => {
-    const d = withReviews();
-    // Paddington's diary row keeps the film URI, so this falls back to title + year + date.
-    const byName = Object.fromEntries(getDiary(d, {}).items.map((e) => [e.name, e.review]));
-    expect(byName).toEqual({ "Paddington 2": "Perfect.", Cats: "Nightmare fuel.", Se7en: undefined });
-    // Same-URI match (how real exports look).
-    d.diary[2].uri = "https://boxd.it/LOGc";
-    d.diary[2].watchedDate = "2020-01-01";
-    expect(getDiary(d, { to: "2020-12-31" }).items[0].review).toBe("Nightmare fuel.");
   });
 
   it("hasSeen and the taste summary carry the user's words", () => {

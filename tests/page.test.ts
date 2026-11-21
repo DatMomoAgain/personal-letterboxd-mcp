@@ -116,23 +116,49 @@ describe("renderPage", () => {
     expect(html).toContain("<h4>Why Claude picked it <span>· Nov 2</span></h4><p>Mann at his peak</p>");
   });
 
-  it("films view: the don't-recommend list sits below the wall, escaped, and only when it has entries", () => {
-    expect(section(render(fixture()), "films")).not.toContain("Don't recommend");
+  it("films view: each title shows once — logged on the wall, then don't recommend, then notes-only, picks on Watch next", () => {
+    const plain = section(render(fixture()), "films");
+    expect(plain).not.toContain('class="extra"');
+    const at = "2026-11-22T00:00:00Z";
     const memory: Memory = {
       ...emptyMemory(),
-      dontRecommend: [
-        { title: "Barry", year: 2018, imdbId: "tt5348176", reason: "dropped in <b>season 1</b>", addedAt: "2026-11-22T00:00:00Z" },
-        { title: "RRR", year: null, imdbId: "tt8178634", reason: "didn't like it", addedAt: "2026-11-22T00:00:00Z" },
-      ],
+      picks: { items: [{ title: "Thief", year: 1981, imdbId: "tt0083190", why: "Mann's first" }], updatedAt: at },
+      titles: {
+        // Unlogged, don't recommend (and a note): the dimmed section, both in its panel.
+        tt5348176: { title: "Barry", year: 2018, dontRecommend: { reason: "dropped in <b>season 1</b>", addedAt: at }, note: { text: "Series.", updatedAt: at } },
+        // Unlogged, note only: the notes section.
+        tt2243973: { title: "Hannibal", year: 2013, note: { text: "Loved it.", updatedAt: at } },
+        // Logged (Heat is watched in the fixture), don't recommend: stays on the wall, reason in its panel.
+        tt0113277: { title: "Heat", year: 1995, dontRecommend: { reason: "seen it twice", addedAt: at }, note: { text: "The heist!", updatedAt: at } },
+        // On Watch next with a note: shows there, not in the notes section.
+        tt0083190: { title: "Thief", year: 1981, note: { text: "Curious about the score.", updatedAt: at } },
+      },
     };
-    const html = section(render(fixture(), memory), "films");
-    expect(html.indexOf("Don't recommend")).toBeGreaterThan(html.indexOf('<ul class="wall">'));
-    expect(html).toContain('href="https://letterboxd.com/imdb/tt5348176/"');
-    expect(html).toContain('<span class="dr-title">Barry</span> <span class="muted num">2018</span>');
-    expect(html).toContain("dropped in &lt;b&gt;season 1&lt;/b&gt;");
-    expect(html).toContain('<span class="dr-title">RRR</span></a>');
-    // Not films on the wall: the count and the posters are unchanged.
-    expect(html.match(/<a class="film"/g)).toHaveLength(7);
+    const html = render(fixture(), memory);
+    const films = section(html, "films");
+    const wallEnd = films.indexOf("</ul>");
+    const dont = films.indexOf("<h2>Don't recommend");
+    const noted = films.indexOf("<h2>Not logged");
+    expect(wallEnd).toBeLessThan(dont);
+    expect(dont).toBeLessThan(noted);
+    const dontPart = films.slice(dont, noted);
+    const notedPart = films.slice(noted);
+
+    expect(dontPart).toContain('<ul class="tiles dim">');
+    expect(dontPart).toContain('href="https://letterboxd.com/imdb/tt5348176/"');
+    expect(dontPart).toContain("dropped in &lt;b&gt;season 1&lt;/b&gt;");
+    expect(dontPart).toContain("<p>Series.</p>");
+    expect(dontPart).not.toContain("Heat");
+    expect(notedPart).toContain(">Hannibal<");
+    expect(notedPart).not.toContain("Barry");
+    expect(notedPart).not.toContain("Thief");
+
+    // Heat stays on the wall (7 logged films), with its reason and note in its panel.
+    expect(films.slice(0, wallEnd).match(/<a class="film"/g)).toHaveLength(7);
+    expect(films.slice(0, wallEnd)).toMatch(/<h3>Heat<\/h3>.*Don't recommend.*seen it twice.*What you told Claude.*The heist!/s);
+
+    // Thief's note shows on its Watch next panel.
+    expect(section(html, "watch")).toMatch(/<h2>Thief<\/h2>.*What you told Claude.*Curious about the score\./s);
   });
 
   it("films wall: every watched film, newest first, with rating, watch dates and review", () => {

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { inMemoryStore } from "../src/memory.ts";
+import { inMemoryStore, normalizeMemory } from "../src/memory.ts";
 import type { RatingsCache } from "../src/ratings.ts";
 import { NO_DATA_MESSAGE, type Services, buildServer } from "../src/server.ts";
 import type { Dataset } from "../src/types.ts";
@@ -21,22 +21,21 @@ describe("buildServer", () => {
   it("lists the data tools (read-only) and the memory tools", async () => {
     const client = await connect(fixture());
     const { tools } = await client.listTools();
-    const readOnly = ["check_films", "find_film", "get_diary", "get_memory", "get_reviews", "get_taste_summary", "get_watched", "get_watchlist"];
+    const readOnly = ["check_films", "find_film", "get_memory", "get_reviews", "get_taste_summary", "get_watched", "get_watchlist"];
     const writing = [
-      "add_dont_recommend",
       "forget",
       "remember",
-      "remove_dont_recommend",
       "remove_picks",
       "save_overview",
       "save_picks",
-      "update_dont_recommend",
+      "save_title_note",
+      "set_dont_recommend",
       "update_note",
       "update_pick",
     ];
     expect(tools.map((t) => t.name).sort()).toEqual([...readOnly, ...writing].sort());
     for (const t of tools) expect(t.annotations?.readOnlyHint).toBe(readOnly.includes(t.name));
-    for (const name of ["forget", "remove_picks", "remove_dont_recommend"]) {
+    for (const name of ["forget", "remove_picks"]) {
       expect(tools.find((t) => t.name === name)?.annotations?.destructiveHint).toBe(true);
     }
     // The user approves every write: each writing tool says so, and so do the instructions.
@@ -44,15 +43,18 @@ describe("buildServer", () => {
     const instructions = client.getInstructions() ?? "";
     for (const name of writing) expect(instructions).toContain(name);
     expect(instructions.replace(/\s+/g, " ")).toContain(
-      "never call remember, update_note, forget, save_overview, save_picks, update_pick, remove_picks, add_dont_recommend, " +
-        "update_dont_recommend or remove_dont_recommend without the user's yes",
+      "never call remember, update_note, forget, save_overview, save_picks, update_pick, remove_picks, set_dont_recommend " +
+        "or save_title_note without the user's yes",
     );
-    // has_seen was renamed; nothing should still point Claude at it.
-    expect(instructions).not.toContain("has_seen");
-    for (const t of tools) expect(t.description).not.toContain("has_seen");
+    // Removed or renamed tools: nothing should still point Claude at them.
+    const everything = [instructions, ...tools.map((t) => t.description ?? "")].join("\n");
+    for (const old of ["has_seen", "get_diary", "add_dont_recommend", "update_dont_recommend", "remove_dont_recommend"]) {
+      expect(everything).not.toContain(old);
+    }
+    expect(everything).not.toMatch(/\):\S/); // no missing space after a closing bracket and colon
   });
 
-  it("don't recommend: add, replace, edit, remove; check_films flags listed titles; get_memory leaves the list out", async () => {
+  it("title records: don't-recommend and Claude notes for any title, all in check_films, none in get_memory", async () => {
     const memory = inMemoryStore();
     const client = await connect(fixture(), memory);
     const call = async (name: string, args: Record<string, unknown>) => {
@@ -60,40 +62,107 @@ describe("buildServer", () => {
       return { res, body: res.isError ? text(res) : JSON.parse(text(res)) };
     };
 
-    expect((await call("add_dont_recommend", { entries: [{ title: "Barry", reason: "x" }] })).res.isError).toBe(true); // no id
-    const added = await call("add_dont_recommend", {
+    expect((await call("set_dont_recommend", { entries: [{ title: "Barry", reason: "x" }] })).res.isError).toBe(true); // no id
+    const set = await call("set_dont_recommend", {
       entries: [
         { title: "Barry", year: 2018, imdbId: "tt5348176", reason: "dropped in season 1" },
-        { title: "Se7en", year: 1995, imdbId: "tt0114369", reason: "seen it, not again" },
+        { title: "Se7en", year: 1996, imdbId: "tt0114369", reason: "seen it, not again" },
       ],
     });
-    expect(added.body).toEqual({ added: ["Barry (2018)", "Se7en (1995)"], onList: 2 });
-    // Re-adding the same id replaces the entry and moves it to the top.
-    await call("add_dont_recommend", { entries: [{ title: "Se7en", year: 1995, imdbId: "tt0114369", reason: "on hold" }] });
-    expect(memory.current.dontRecommend?.map((e) => [e.title, e.reason])).toEqual([["Se7en", "on hold"], ["Barry", "dropped in season 1"]]);
+    // The reply says which titles are logged on Letterboxd (Se7en is, a year off), and links them for exact joins.
+    expect(set.body).toEqual([
+      { imdbId: "tt5348176", title: "Barry (2018)", dontRecommend: "added", letterboxd: "not logged on Letterboxd" },
+      { imdbId: "tt0114369", title: "Se7en (1996)", dontRecommend: "added", letterboxd: "logged: Se7en (1995)" },
+    ]);
+    expect(memory.current.titles?.tt0114369.letterboxdUri).toMatch(/^https:\/\/boxd\.it\//);
+    expect(memory.current.titles?.tt5348176.letterboxdUri).toBeUndefined();
 
-    // check_films: a listed title carries the reason, whether or not Letterboxd knows it; a year one off still matches.
-    const checked = (await call("check_films", { films: [{ title: "barry", year: 2019 }, { title: "Se7en" }, { title: "Heat" }] })).body;
-    expect(checked[0]).toMatchObject({ query: "barry", matches: [], dontRecommend: { reason: "dropped in season 1", addedOn: expect.any(String) } });
-    expect(checked[1]).toMatchObject({ exactMatch: true, dontRecommend: { reason: "on hold" } });
+    // A changed reason keeps when it was added.
+    const addedAt = memory.current.titles?.tt5348176.dontRecommend?.addedAt;
+    expect((await call("set_dont_recommend", { entries: [{ title: "Barry", year: 2018, imdbId: "tt5348176", reason: "female lead" }] })).body[0].dontRecommend).toBe("reason changed");
+    expect(memory.current.titles?.tt5348176.dontRecommend).toEqual({ reason: "female lead", addedAt });
+
+    // One Claude note per title: saving again replaces it and keeps the old text as the previous version.
+    expect((await call("save_title_note", { title: "Heat", year: 1995, imdbId: "tt0113277", note: "Loved the bank heist." })).body).toMatchObject({
+      note: "saved",
+      letterboxd: "logged: Heat (1995)",
+    });
+    expect((await call("save_title_note", { title: "Heat", year: 1995, imdbId: "tt0113277", note: "Loved the heist; the rest dragged." })).body.note).toMatch(/^replaced/);
+    expect(memory.current.titles?.tt0113277).toMatchObject({
+      note: { text: "Loved the heist; the rest dragged." },
+      previousNote: { text: "Loved the bank heist." },
+    });
+    await call("save_title_note", { title: "Hannibal", year: 2013, imdbId: "tt2243973", note: "Series, loved it." });
+
+    // check_films: everything about each title in one place, by title (a year off) or by IMDb id.
+    const checked = (
+      await call("check_films", {
+        films: [{ title: "barry", year: 2019 }, { title: "Se7en" }, { title: "Heat" }, { title: "Hannibal TV", imdbId: "tt2243973" }, { title: "Ran" }],
+      })
+    ).body;
+    expect(checked[0]).toMatchObject({ query: "barry", matches: [], dontRecommend: { reason: "female lead" }, recordImdbId: "tt5348176" });
+    expect(checked[1]).toMatchObject({ exactMatch: true, dontRecommend: { reason: "seen it, not again" } });
     expect(checked[1].matches[0]).toMatchObject({ name: "Se7en", watched: true });
+    expect(checked[2]).toMatchObject({ claudeNote: { text: "Loved the heist; the rest dragged.", updatedOn: expect.any(String) } });
     expect(checked[2].dontRecommend).toBeUndefined();
+    expect(checked[3]).toMatchObject({ imdbId: "tt2243973", matches: [], claudeNote: { text: "Series, loved it." } });
+    expect(checked[4]).toEqual({ query: "Ran", exactMatch: false, matches: [] });
     expect((await call("check_films", { films: [{ title: "Barry", year: 2010 }] })).body[0].dontRecommend).toBeUndefined();
 
-    expect((await call("get_memory", {})).body.dontRecommend).toBeUndefined();
+    // get_watched marks films with a note; get_memory carries none of it.
+    const watchedFilms = (await call("get_watched", {})).body.items;
+    expect(watchedFilms.filter((f: { hasClaudeNote?: boolean }) => f.hasClaudeNote).map((f: { name: string }) => f.name)).toEqual(["Heat"]);
+    const got = (await call("get_memory", {})).body;
+    expect(got.titles).toBeUndefined();
+    expect(JSON.stringify(got)).not.toContain("Loved the heist");
 
-    await call("update_dont_recommend", { imdbId: "tt5348176", reason: "female lead unbearable" });
-    expect(memory.current.dontRecommend?.[1]).toMatchObject({ title: "Barry", year: 2018, reason: "female lead unbearable" });
-    expect((await call("update_dont_recommend", { imdbId: "tt5348176" })).res.isError).toBe(true); // nothing to change
-    expect((await call("update_dont_recommend", { imdbId: "tt0000001", reason: "x" })).res.isError).toBe(true);
+    // Clearing: null takes a title off don't-recommend, or deletes its note; an empty record disappears.
+    expect((await call("set_dont_recommend", { entries: [{ title: "Barry", imdbId: "tt5348176", reason: null }] })).body[0].dontRecommend).toBe("taken off");
+    expect(memory.current.titles?.tt5348176).toBeUndefined();
+    await call("save_title_note", { title: "Heat", imdbId: "tt0113277", note: null });
+    expect(memory.current.titles?.tt0113277).toBeUndefined();
+    expect((await call("save_title_note", { title: "Heat", imdbId: "tt0113277", note: null })).res.isError).toBe(true);
+  });
 
-    expect((await call("remove_dont_recommend", { imdbIds: ["tt0114369", "tt0000001"] })).body).toEqual({
-      removed: ["tt0114369"],
-      notOnList: ["tt0000001"],
-      onList: 1,
+  it("check_films: an unlogged pick carries its reason on the result; works before any upload", async () => {
+    const memory = inMemoryStore({
+      notes: [],
+      overview: null,
+      picks: { items: [{ title: "Thief", year: 1981, imdbId: "tt0083190", why: "Mann's first" }], updatedAt: "2026-11-01T00:00:00.000Z" },
+      titles: { tt2243973: { title: "Hannibal", year: 2013, note: { text: "Series, loved it.", updatedAt: "2026-11-20T00:00:00.000Z" } } },
     });
-    expect((await call("remove_dont_recommend", { imdbIds: ["tt0000001"] })).res.isError).toBe(true);
-    expect(memory.current.dontRecommend?.map((e) => e.title)).toEqual(["Barry"]);
+    const withData = await connect(fixture(), memory);
+    const body = JSON.parse(text(await withData.callTool({ name: "check_films", arguments: { films: [{ title: "Thief", year: 1981 }] } })));
+    expect(body[0]).toMatchObject({ matches: [], pickedBecause: "Mann's first", onWatchNext: true });
+
+    const noData = await connect(null, memory);
+    const early = JSON.parse(text(await noData.callTool({ name: "check_films", arguments: { films: [{ title: "Hannibal" }] } })));
+    expect(early[0]).toMatchObject({ matches: [], claudeNote: { text: "Series, loved it." } });
+  });
+
+  it("converts the old don't-recommend list into title records, and links titles logged since", async () => {
+    const memory = inMemoryStore(
+      normalizeMemory({
+        notes: [],
+        overview: null,
+        picks: null,
+        dontRecommend: [
+          { title: "RRR", year: 2022, imdbId: "tt8178634", reason: "didn't like it", addedAt: "2026-11-21T00:00:00.000Z" },
+          { title: "Heat", year: 1995, imdbId: "tt0113277", reason: "seen it", addedAt: "2026-11-21T00:00:00.000Z" },
+        ],
+      }),
+    );
+    expect(memory.current.titles?.tt8178634).toEqual({
+      title: "RRR",
+      year: 2022,
+      dontRecommend: { reason: "didn't like it", addedAt: "2026-11-21T00:00:00.000Z" },
+    });
+    expect(memory.current).not.toHaveProperty("dontRecommend");
+    // get_memory (every chat's first call) links Heat to the logged film, and saves that.
+    const client = await connect(fixture(), memory);
+    await client.callTool({ name: "get_memory", arguments: {} });
+    expect(memory.current.titles?.tt0113277.letterboxdUri).toMatch(/^https:\/\/boxd\.it\//);
+    expect(memory.current.titles?.tt8178634.letterboxdUri).toBeUndefined();
   });
 
   it("memory: remember, update, forget, overview and picks round-trip", async () => {
@@ -185,21 +254,6 @@ describe("buildServer", () => {
     // Watching it again later, or a second get_memory, doesn't duplicate it.
     await call("get_memory", {});
     expect(memory.current.pastPicks).toHaveLength(1);
-  });
-
-  it("get_diary marks entries for films that were picks", async () => {
-    const memory = inMemoryStore({
-      notes: [],
-      overview: null,
-      picks: null,
-      pastPicks: [{ title: "Se7en", year: 1995, why: "tight thriller", movedAt: "2026-11-10T00:00:00.000Z" }],
-    });
-    const client = await connect(fixture(), memory);
-    const diary = JSON.parse(text(await client.callTool({ name: "get_diary", arguments: {} }))).items;
-    const se7en = diary.filter((e: { name: string }) => e.name === "Se7en");
-    expect(se7en.length).toBeGreaterThan(0);
-    for (const e of se7en) expect(e).toMatchObject({ pickedBecause: "tight thriller" });
-    expect(diary.find((x: { name: string }) => x.name !== "Se7en").pickedBecause).toBeUndefined();
   });
 
   it("notes carry a title, topic and example films; updates change only what's passed", async () => {
@@ -363,7 +417,7 @@ describe("buildServer", () => {
     const client = await connect(fixture());
     const res = await client.callTool({ name: "get_watched", arguments: { minRating: 9 } });
     expect(res.isError).toBe(true);
-    const bad = await client.callTool({ name: "get_diary", arguments: { from: "last week" } });
+    const bad = await client.callTool({ name: "get_watched", arguments: { watchedFrom: "last week" } });
     expect(bad.isError).toBe(true);
   });
 });

@@ -39,6 +39,10 @@ export interface WatchedOptions extends PageOptions {
   maxRating?: number;
   yearFrom?: number;
   yearTo?: number;
+  /** YYYY-MM-DD: only films watched (any diary date, else the day marked watched) on or after this day. */
+  watchedFrom?: string;
+  /** YYYY-MM-DD: only films watched on or before this day. */
+  watchedTo?: string;
   sort?: WatchedSort;
 }
 
@@ -64,13 +68,16 @@ export type WatchedItem = Omit<WatchedFilm, "watched">;
 
 /** Every watched film, rated or not: filterable, sortable (newest watch first by default), paginated. */
 export function getWatched(d: Dataset, o: WatchedOptions): Page<WatchedItem> {
+  const inRange = (day: string) => !!day && (o.watchedFrom === undefined || day >= o.watchedFrom) && (o.watchedTo === undefined || day <= o.watchedTo);
+  const dated = o.watchedFrom !== undefined || o.watchedTo !== undefined;
   const filtered = getFilms(d).filter(
     (f) =>
       (o.rated === undefined || (f.rating !== null) === o.rated) &&
       (o.minRating === undefined || (f.rating !== null && f.rating >= o.minRating)) &&
       (o.maxRating === undefined || (f.rating !== null && f.rating <= o.maxRating)) &&
       (o.yearFrom === undefined || (f.year !== null && f.year >= o.yearFrom)) &&
-      (o.yearTo === undefined || (f.year !== null && f.year <= o.yearTo)),
+      (o.yearTo === undefined || (f.year !== null && f.year <= o.yearTo)) &&
+      (!dated || (f.diaryDates.length ? f.diaryDates : [f.lastDate]).some(inRange)),
   );
   const result = page(filtered.sort(watchedSorters[o.sort ?? "date_desc"]), o);
   return {
@@ -82,48 +89,9 @@ export function getWatched(d: Dataset, o: WatchedOptions): Page<WatchedItem> {
   };
 }
 
-export interface DiaryOptions extends PageOptions {
-  from?: string;
-  to?: string;
-}
-
 const diaryDay = (e: DiaryEntry) => e.watchedDate ?? e.date;
 
 const newestFirst = (a: DiaryEntry, b: DiaryEntry) => diaryDay(b).localeCompare(diaryDay(a)) || byName(a, b);
-
-/**
- * Finds the review written for a diary entry. Letterboxd gives a review the same
- * log-entry URI as its diary row; fall back to title + year + watch date.
- */
-function reviewLookup(d: Dataset): (e: DiaryEntry) => string | undefined {
-  const byUri = new Map<string, string>();
-  const byEntry = new Map<string, string>();
-  const key = (e: DiaryEntry) => `${normalizeTitle(e.name)}|${e.year}|${diaryDay(e)}`;
-  for (const r of d.reviews) {
-    if (!r.review.trim()) continue;
-    byUri.set(r.uri, r.review);
-    byEntry.set(key(r), r.review);
-  }
-  return (e) => byUri.get(e.uri) ?? byEntry.get(key(e));
-}
-
-export type DiaryEntryWithReview = DiaryEntry & { review?: string };
-
-export function getDiary(d: Dataset, o: DiaryOptions): Page<DiaryEntryWithReview> {
-  const reviewFor = reviewLookup(d);
-  const filtered = d.diary.filter((e) => {
-    const day = diaryDay(e);
-    return (o.from === undefined || day >= o.from) && (o.to === undefined || day <= o.to);
-  });
-  const result = page([...filtered].sort(newestFirst), o);
-  return {
-    ...result,
-    items: result.items.map((e) => {
-      const review = reviewFor(e);
-      return review === undefined ? e : { ...e, review };
-    }),
-  };
-}
 
 export function getWatchlist(d: Dataset, o: PageOptions): Page<DatedFilm> {
   return page([...d.watchlist].sort((a, b) => b.date.localeCompare(a.date) || byName(a, b)), o);
@@ -244,6 +212,28 @@ export function getFilms(d: Dataset): WatchedFilm[] {
     .sort((a, b) => b.lastDate.localeCompare(a.lastDate) || byName(a, b));
 }
 
+/**
+ * The watched film a stored title (a pick, a title record) is about: by its Letterboxd link when known,
+ * else by title and a release year one off either way, closest year first.
+ */
+export function loggedFilmFinder(d: Dataset | null): (t: { title: string; year: number | null; letterboxdUri?: string }) => WatchedFilm | undefined {
+  const films = d ? getFilms(d) : [];
+  const byUri = new Map(films.map((f) => [f.uri, f]));
+  const byTitle = new Map<string, WatchedFilm[]>();
+  for (const f of films) {
+    const k = normalizeTitle(f.name);
+    byTitle.set(k, [...(byTitle.get(k) ?? []), f]);
+  }
+  return (t) => {
+    if (t.letterboxdUri && byUri.has(t.letterboxdUri)) return byUri.get(t.letterboxdUri);
+    const off = (f: WatchedFilm) => (t.year === null || f.year === null ? 0 : Math.abs(f.year - t.year));
+    return byTitle
+      .get(normalizeTitle(t.title))
+      ?.filter((f) => off(f) <= 1)
+      .sort((a, b) => off(a) - off(b))[0];
+  };
+}
+
 export interface SeenResult {
   query: string;
   /** false when matches are partial title matches (or empty) — not proof the user saw this film. */
@@ -296,7 +286,7 @@ export interface TasteSummary {
 }
 
 /** Keeps the summary bounded once the user has written a lot; get_reviews pages through the rest. */
-export const SUMMARY_REVIEWS = 30;
+export const SUMMARY_REVIEWS = 10;
 export const SUMMARY_REVIEW_CHARS = 1500;
 
 const avg1 = (xs: number[]): number | null =>

@@ -70,11 +70,27 @@ export interface PastPick extends Pick {
   movedAt: string;
 }
 
-/** A film or series Claude must not recommend, and why (already seen elsewhere, disliked, on hold, …). */
-export interface DontRecommend {
+/**
+ * What Claude knows about one film or series beyond Letterboxd, keyed by IMDb id in Memory.titles.
+ * Any title can have one, logged on Letterboxd or not. Never loaded up front: check_films attaches it.
+ */
+export interface TitleRecord {
   title: string;
   year: number | null;
-  /** Which title this is; also what edits and removals go by. */
+  /** The logged Letterboxd film this is (its boxd.it link), once matched; makes the join exact. */
+  letterboxdUri?: string;
+  /** Don't recommend this title, and why (seen elsewhere, disliked, on hold, …). */
+  dontRecommend?: { reason: string; addedAt: string };
+  /** One text per title: what the user told Claude about it in chats. */
+  note?: { text: string; updatedAt: string };
+  /** The note's text before its last change, so an overwrite can be undone. */
+  previousNote?: { text: string; updatedAt: string };
+}
+
+/** The old shape of the don't-recommend list (an array), converted into titles on load. */
+interface LegacyDontRecommend {
+  title: string;
+  year: number | null;
   imdbId: string;
   reason: string;
   addedAt: string;
@@ -88,8 +104,8 @@ export interface Memory {
   picks: { items: Pick[]; updatedAt: string } | null;
   /** Picks the user has watched, most recently moved first. Missing in memory saved before 2026-11-22. */
   pastPicks?: PastPick[];
-  /** Titles not to recommend, newest first. Looked up per film (check_films), never loaded up front. */
-  dontRecommend?: DontRecommend[];
+  /** Per-title records by IMDb id. Looked up per title (check_films), never loaded up front. */
+  titles?: Record<string, TitleRecord>;
 }
 
 /** Load/save seam: KV in the Worker, a plain variable in tests. */
@@ -100,18 +116,24 @@ export interface MemoryStore {
 
 export const MEMORY_KEY = "memory";
 
-export const emptyMemory = (): Memory => ({ notes: [], overview: null, picks: null, pastPicks: [], dontRecommend: [] });
+export const emptyMemory = (): Memory => ({ notes: [], overview: null, picks: null, pastPicks: [], titles: {} });
 
-/** Tolerates a missing or partly-shaped stored value. */
+/** Tolerates a missing or partly-shaped stored value, and converts the old don't-recommend array into titles. */
 export function normalizeMemory(raw: unknown): Memory {
   if (!raw || typeof raw !== "object") return emptyMemory();
-  const m = raw as Partial<Memory>;
+  const m = raw as Partial<Memory> & { dontRecommend?: LegacyDontRecommend[] };
+  const titles: Record<string, TitleRecord> = m.titles && typeof m.titles === "object" ? { ...m.titles } : {};
+  for (const e of Array.isArray(m.dontRecommend) ? m.dontRecommend : []) {
+    if (!e?.imdbId) continue;
+    const r = titles[e.imdbId] ?? { title: e.title, year: e.year ?? null };
+    titles[e.imdbId] = { ...r, dontRecommend: r.dontRecommend ?? { reason: e.reason, addedAt: e.addedAt } };
+  }
   return {
     notes: Array.isArray(m.notes) ? m.notes : [],
     overview: m.overview ?? null,
     picks: m.picks ?? null,
     pastPicks: Array.isArray(m.pastPicks) ? m.pastPicks : [],
-    dontRecommend: Array.isArray(m.dontRecommend) ? m.dontRecommend : [],
+    titles,
   };
 }
 
@@ -209,42 +231,84 @@ export function archiveWatched(m: Memory, isWatched: (p: Pick) => boolean, now: 
   };
 }
 
-// ---------- don't recommend ----------
+// ---------- per-title records ----------
 
-/** Puts these entries at the top, in the order given. A title already listed (same IMDb id) is replaced, not duplicated. */
-export function addDontRecommend(m: Memory, entries: Omit<DontRecommend, "addedAt">[], now: string): Memory {
-  const ids = new Set<string>();
-  const list = [...entries.map((e) => ({ ...e, addedAt: now })), ...(m.dontRecommend ?? [])].filter((e) => !ids.has(e.imdbId) && ids.add(e.imdbId));
-  return { ...m, dontRecommend: list };
+/** Which title a change is about: its IMDb id, plus the name and year to store (latest wins). */
+export interface TitleRef {
+  imdbId: string;
+  title: string;
+  year: number | null;
 }
 
-/** Changes the entry with this IMDb id in place; fields left undefined stay. Returns null when no entry has that id. */
-export function updateDontRecommend(
-  m: Memory,
-  imdbId: string,
-  edit: Partial<Omit<DontRecommend, "imdbId" | "addedAt">>,
-): Memory | null {
-  const list = m.dontRecommend ?? [];
-  if (!list.some((e) => e.imdbId === imdbId)) return null;
-  const defined = Object.fromEntries(Object.entries(edit).filter(([, v]) => v !== undefined));
-  return { ...m, dontRecommend: list.map((e) => (e.imdbId === imdbId ? { ...e, ...defined } : e)) };
+/** Applies `change` to the record for `t` (creating it), then drops the record if nothing is left in it. */
+function withTitle(m: Memory, t: TitleRef, change: (r: TitleRecord) => TitleRecord): Memory {
+  const titles = { ...(m.titles ?? {}) };
+  const current = titles[t.imdbId];
+  const next = change({ ...current, title: t.title, year: t.year });
+  if (!next.note && !next.dontRecommend && !next.previousNote) delete titles[t.imdbId];
+  else titles[t.imdbId] = next;
+  return { ...m, titles };
 }
 
-/** Drops the entries with these IMDb ids. */
-export function removeDontRecommend(m: Memory, imdbIds: string[]): Memory {
-  const drop = new Set(imdbIds);
-  return { ...m, dontRecommend: (m.dontRecommend ?? []).filter((e) => !drop.has(e.imdbId)) };
+/** Sets (or, with null, clears) a title's don't-recommend reason. A changed reason keeps its original addedAt. */
+export function setDontRecommend(m: Memory, t: TitleRef, reason: string | null, now: string): Memory {
+  return withTitle(m, t, (r) => {
+    const { dontRecommend, ...rest } = r;
+    return reason === null ? rest : { ...rest, dontRecommend: { reason, addedAt: dontRecommend?.addedAt ?? now } };
+  });
 }
 
-/** Finds a title's entry by title and release year (one off either way, like picks). Unlisted titles get undefined. */
-export function dontRecommendFinder(m: Memory): (film: { name: string; year: number | null }) => DontRecommend | undefined {
-  const byTitle = new Map<string, DontRecommend[]>();
-  for (const e of m.dontRecommend ?? []) {
-    const k = normalizeTitle(e.title);
-    byTitle.set(k, [...(byTitle.get(k) ?? []), e]);
+/**
+ * Sets (or, with null, clears) a title's Claude note, the whole text at once.
+ * The text it replaces is kept as previousNote, so an overwrite can be undone; clearing drops both.
+ */
+export function setTitleNote(m: Memory, t: TitleRef, text: string | null, now: string): Memory {
+  return withTitle(m, t, (r) => {
+    const { note, previousNote: _, ...rest } = r;
+    if (text === null) return rest;
+    if (note?.text === text) return r;
+    return { ...rest, note: { text, updatedAt: now }, ...(note && { previousNote: note }) };
+  });
+}
+
+/** Stores the Letterboxd link of each record's logged film (from `uriFor`). Unchanged memory when nothing new matched. */
+export function linkTitles(m: Memory, uriFor: (r: TitleRecord) => string | undefined): { memory: Memory; changed: boolean } {
+  let changed = false;
+  const titles = Object.fromEntries(
+    Object.entries(m.titles ?? {}).map(([id, r]) => {
+      const uri = uriFor(r);
+      if (!uri || uri === r.letterboxdUri) return [id, r];
+      changed = true;
+      return [id, { ...r, letterboxdUri: uri }];
+    }),
+  );
+  return { memory: changed ? { ...m, titles } : m, changed };
+}
+
+/**
+ * Finds a title's record: by IMDb id when known, else by the logged film's Letterboxd link,
+ * else by title and release year (one off either way, as elsewhere).
+ */
+export function titleFinder(m: Memory): (film: { name: string; year: number | null; uri?: string; imdbId?: string }) =>
+  | (TitleRecord & { imdbId: string })
+  | undefined {
+  const entries = Object.entries(m.titles ?? {}).map(([imdbId, r]) => ({ ...r, imdbId }));
+  const byUri = new Map(entries.flatMap((r) => (r.letterboxdUri ? [[r.letterboxdUri, r] as const] : [])));
+  const byTitle = new Map<string, (TitleRecord & { imdbId: string })[]>();
+  for (const r of entries) {
+    const k = normalizeTitle(r.title);
+    byTitle.set(k, [...(byTitle.get(k) ?? []), r]);
   }
-  return (film) =>
-    byTitle.get(normalizeTitle(film.name))?.find((e) => e.year === null || film.year === null || Math.abs(e.year - film.year) <= 1);
+  return (film) => {
+    if (film.imdbId) {
+      const r = m.titles?.[film.imdbId];
+      if (r) return { ...r, imdbId: film.imdbId };
+    }
+    if (film.uri && byUri.has(film.uri)) return byUri.get(film.uri);
+    return byTitle
+      .get(normalizeTitle(film.name))
+      ?.find((r) => (!film.uri || !r.letterboxdUri) && (r.year === null || film.year === null || Math.abs(r.year - film.year) <= 1));
+  };
 }
 
 export interface PickReason {

@@ -23,9 +23,11 @@ The private page, with my own data:
 ## What it does
 
 **For Claude (MCP tools)**
-- Read: taste summary, every watched film (`get_watched`), diary, reviews, watchlist, and "can I
-  recommend these?" (`check_films`, a whole list at once: whether you've seen each one, and whether
-  it's on your don't-recommend list), with your review text attached wherever a film appears. `find_film` looks up IMDb ids, ratings and vote counts, so recommendations quote real scores.
+- Read: taste summary, every watched film (`get_watched`, filterable by rating, release year and
+  watch date), reviews, watchlist, and one lookup for everything known about a title (`check_films`,
+  a whole list at once: your Letterboxd rating, liked and reviews, why Claude picked it, whether you've
+  ruled it out, and Claude's note on it). `find_film` looks up IMDb ids, ratings and vote counts, so
+  recommendations quote real scores.
 - Taste memory: Claude saves what it learns about your taste (`remember`, `update_note`, `forget`)
   in your own Cloudflare KV, not in Claude's memory, and reads it first in every chat. It asks before
   every write, and its instructions guard against overcorrecting: one review isn't a general rule,
@@ -36,10 +38,13 @@ The private page, with my own data:
   belong to the right film. Once you've watched one, its reason is kept: Claude sees it as
   `pickedBecause` whenever it looks that film up, next to your rating and review, so it can learn
   what landed.
-- A don't-recommend list (`add_dont_recommend`, `update_dont_recommend`, `remove_dont_recommend`):
-  films and series Claude shouldn't suggest, each with your reason (seen elsewhere, such as a series
-  Letterboxd doesn't track; disliked; on hold). It's never loaded up front: `check_films` flags a
-  listed title when Claude checks it. Turning down one title goes here instead of becoming a taste note.
+- Per-title records, for any film or series, logged on Letterboxd or not, keyed by IMDb id:
+  a don't-recommend reason (`set_dont_recommend`: seen elsewhere, such as a series Letterboxd doesn't
+  track; disliked; on hold) and one Claude note (`save_title_note`: what you said about it in chats that
+  your rating and review don't show, such as why a rating seems to contradict a taste note). They're
+  never loaded up front; `check_films` shows them, and `get_watched` marks films that have a note.
+  Something about one title goes here instead of becoming a taste note. A replaced note keeps its
+  previous version, and saving reports whether the title matched a film you've logged.
 - A written overview of your taste for the personal page (`save_overview`).
 
 **For you (a private web page)**
@@ -47,8 +52,10 @@ The private page, with my own data:
   watched them), with Claude's reason and IMDb, Rotten Tomatoes and Metacritic scores linking to each site.
 - **Films:** a poster wall of everything you've watched, with stars, a heart on liked films, search,
   filters (liked, reviewed, Claude's picks, rating, decade) and sorting. Selecting a film shows your
-  rating, watch dates and review, and for a past pick, why Claude picked it. Below the wall, your
-  don't-recommend list with the reason for each title.
+  rating, watch dates and review, why Claude picked it, and what you've told Claude about it. Below
+  the wall, titles you haven't logged: first the ones Claude mustn't recommend (dimmed), then the
+  ones you've only talked about. Each title shows in one place; logging one moves it onto the wall.
+  Watch next shows a pick's Claude note on its card.
 - **Taste:** Claude's overview, then its notes about you grouped by topic. Each note is a theme with a
   headline, the detail, and example films showing your rating and how each landed. Rating and decade
   charts jump to the matching films.
