@@ -1,141 +1,89 @@
 # personal-letterboxd-mcp
 
-A personal, single-user [MCP](https://modelcontextprotocol.io) server on Cloudflare Workers that gives Claude
-(claude.ai, the apps, and Claude Code) access to your Letterboxd history, so film recommendations
-are based on what you've actually watched and what you wrote about it.
-
-It works from Letterboxd's official data export, not scraping and not your password.
-
-## What it looks like
-
-The private page, with my own data:
+A personal [MCP](https://modelcontextprotocol.io) server that gives Claude (claude.ai, the apps and
+Claude Code) your Letterboxd history and a taste memory it keeps for you, so recommendations are based
+on what you've watched and what you wrote about it. It reads Letterboxd's official data export: no
+scraping, no password.
 
 ![Watch next: your watch list on a poster stage with IMDb, Rotten Tomatoes and Metacritic scores](docs/screenshots/watch-next.png)
 
-![Films: a poster wall of everything watched, with stars, a heart on liked films, search, filters and sorting](docs/screenshots/films.png)
-
-![A watched film: your rating and review, then why Claude picked it](docs/screenshots/film-detail.png)
-
 ![Taste: Claude's overview, then its notes grouped by topic with example films](docs/screenshots/taste.png)
-
-<img src="docs/screenshots/phone.png" alt="Watch next on a phone" width="300">
 
 ## What it does
 
-**For Claude (MCP tools)**
-- Read: taste summary, every watched film (`get_watched`, filterable by rating, release year and
-  watch date), reviews, watchlist, and one lookup for everything known about a title (`check_films`,
-  a whole list at once: your Letterboxd rating, liked and reviews, why Claude picked it, whether you've
-  ruled it out, and Claude's note on it). `find_film` looks up IMDb ids, ratings and vote counts, so
-  recommendations quote real scores.
-- Taste memory: Claude saves what it learns about your taste (`remember`, `update_note`, `forget`)
-  in your own Cloudflare KV, not in Claude's memory, and reads it first in every chat. It asks before
-  every write, and its instructions guard against overcorrecting: one review isn't a general rule,
-  a proposed note gets checked against the rest of your ratings first, and one missed recommendation
-  is no reason to rewrite your taste.
-- Your watch list (`save_picks`, `update_pick`, `remove_picks`): films you decide to watch in a chat,
-  each with Claude's reason. Each carries an IMDb id the server checks on save, so scores always
-  belong to the right film. Once you've watched one, its reason is kept: Claude sees it as
-  `pickedBecause` whenever it looks that film up, next to your rating and review, so it can learn
-  what landed.
-- Per-title records, for any film or series, logged on Letterboxd or not, keyed by IMDb id:
-  a don't-recommend reason (`set_dont_recommend`: seen elsewhere, such as a series Letterboxd doesn't
-  track; disliked; on hold) and one Claude note (`save_title_note`: what you said about it in chats that
-  your rating and review don't show, such as why a rating seems to contradict a taste note). They're
-  never loaded up front; `check_films` shows them, and `get_watched` marks films that have a note.
-  Something about one title goes here instead of becoming a taste note. A replaced note keeps its
-  previous version, and saving reports whether the title matched a film you've logged.
-- A written overview of your taste for the personal page (`save_overview`).
+**For Claude**
+- Reads your watched films, ratings, reviews and watchlist. `check_films` gives everything known about
+  a list of titles in one call; `find_film` gets IMDb ids and real ratings.
+- Keeps a **taste memory** in your own storage, not Claude's memory, and reads it first in every chat.
+  It asks before every write and is told not to overcorrect from one review.
+- Keeps your **watch next** list of films you've decided to watch, each with Claude's reason. Once
+  you've watched one, the reason stays so Claude can learn what landed.
+- Per title, for any film or series: a **don't-recommend** reason and one **note** about what you said
+  in chats.
 
-**For you (a private web page)**
-- **Watch next:** your watch list one film at a time on a poster stage (films leave it once you've
-  watched them), with Claude's reason and IMDb, Rotten Tomatoes and Metacritic scores linking to each site.
-- **Films:** a poster wall of everything you've watched, with stars, a heart on liked films, search,
-  filters (liked, reviewed, Claude's picks, rating, decade) and sorting. Selecting a film shows your
-  rating, watch dates and review, why Claude picked it, and what you've told Claude about it. Below
-  the wall, titles you haven't logged: first the ones Claude mustn't recommend (dimmed), then the
-  ones you've only talked about. Each title shows in one place; logging one moves it onto the wall.
-  Watch next shows a pick's Claude note on its card.
-- **Taste:** Claude's overview, then its notes about you grouped by topic. Each note is a theme with a
-  headline, the detail, and example films showing your rating and how each landed. Rating and decade
-  charts jump to the matching films.
-- An upload dialog for a new Letterboxd export ZIP, so it works from any device.
-- Server-rendered HTML with one small inline script (per-request CSP nonce, no network access, no
-  third-party code), no-referrer, noindex. Without JavaScript it's one long readable page.
+**For you**, a private page:
+- **Watch next:** one pick at a time, with Claude's reason and IMDb, Rotten Tomatoes and Metacritic scores.
+- **Films:** a poster wall of everything you've watched, with search and filters.
+- **Taste:** Claude's overview and notes about your taste, with example films.
+- An upload box for a new Letterboxd export, from any device.
 
 ## Talking to it
 
-It works best when you say which of three things you want: talk about a film, get recommendations,
-or review your taste notes. Asking "anything you want to revise?" invites Claude to find changes.
+Say which of three things you want:
 
-**After watching something** (the best source of taste notes)
 > Just watched The Revenant, gave it 3.5. Let's talk about it.
 
-> Logged Moneyball. Ask me anything you're unsure about from my review.
+> Recommend 5 films for tonight. Something tense, under 2 hours.
 
-Claude asks questions, and notes come from what you say, not from reading too much into one review.
+> Review my taste notes against my whole history. Flag anything contradicted or out of date.
 
-**Recommendations**
-> Recommend 5 films for tonight. In the mood for something tense, under 2 hours.
+If Claude reads too much into something, "that was just about that film" corrects it.
 
-> Something like Spotlight: capable people solving a problem.
+## Run your own copy
 
-> Pick one film from my watch next list for tonight.
+Each person runs their own copy on their own free Cloudflare account. In Claude Code, open this folder
+and ask it to set this up: the [setup skill](.claude/skills/setup/SKILL.md) walks you through it.
 
-A mood only counts for that chat. A count and a running time keep the list focused.
-
-**Reviewing your taste notes** (now and then, not after every film)
-> Review my taste notes against my whole history. Flag anything contradicted or out of date, but
-> don't propose new notes.
-
-> Is there a pattern in my last 10 ratings that shows up across several films? Only flag it if it's in more than one.
-
-> How did your recent picks land?
-
-If Claude reads too much into something, "that was just about that film" is enough to correct it.
-
-## How access works
-
-There's no login. The MCP endpoint and the page live at `/mcp/<token>` and `/home/<token>`, where
-`<token>` is a long random secret (`MCP_TOKEN`). Everything else returns 404. Treat both URLs like
-passwords.
-
-## Setup
-
-Requires Node 22+ and a Cloudflare account (the free plan is plenty).
-For posters, also a free [TMDB](https://www.themoviedb.org/settings/api) account: use its
-**API Read Access Token** (not the shorter API Key). Without it everything works, just without posters.
-For scores on picks, a free [OMDb](https://www.omdbapi.com/apikey.aspx) API key (click the
-activation link in its email). Without it, picks just show no scores.
+You need Node 22+, a free [Cloudflare](https://dash.cloudflare.com/sign-up) account and your Letterboxd
+export (letterboxd.com → Settings → Data → Export your data). Optional: a
+[TMDB](https://www.themoviedb.org/settings/api) **API Read Access Token** for posters, and an
+[OMDb](https://www.omdbapi.com/apikey.aspx) key for scores.
 
 ```sh
 npm install
 npx wrangler login
-npx wrangler kv namespace create LETTERBOXD   # put the id in wrangler.jsonc
-openssl rand -hex 32 | npx wrangler secret put MCP_TOKEN
-npx wrangler secret put TMDB_TOKEN            # optional: TMDB "API Read Access Token", for posters
-npx wrangler secret put OMDB_KEY              # optional: OMDb API key, for IMDb/RT/Metacritic scores
-npm run deploy
+npm run setup
 ```
 
-Then add `https://<your-worker>.workers.dev/mcp/<token>` as a custom connector in claude.ai
-(Settings → Connectors), and open `/home/<token>` to upload your export
-(letterboxd.com → Settings → Data → Export your data). You can also upload from the command line:
-`npm run upload -- path/to/export.zip`.
+`npm run setup` deploys the Worker, makes a secret token, checks it works and saves two secret links:
+`.connector-url` (for Claude) and `.page-url` (your page). There's no login: the token in these links
+is the only lock, so treat them like passwords. If setup says your account has no workers.dev address,
+open Workers & Pages in the Cloudflare dashboard once, then run it again.
+
+Then:
+
+1. Open the link in `.page-url` and upload your export ZIP. Re-upload a new export whenever you like.
+2. Add the link in `.connector-url` as a custom connector in claude.ai (Settings → Connectors), or in
+   Claude Code: `claude mcp add --transport http letterboxd "$(cat .connector-url)"`
+3. Optional, in your own terminal (each asks for the key):
+   `npx wrangler secret put TMDB_TOKEN` and `npx wrangler secret put OMDB_KEY`
+
+**Later:**
+- Update: `git pull && npm run deploy`. Then refresh the connector in claude.ai and start a new chat.
+- Leaked link: `npm run setup -- --new-token`. The old links stop working.
+- Remove: delete the connector, then `npx wrangler delete`. Your data stays in a KV namespace until you
+  delete that too (`npx wrangler kv namespace list`, then `npx wrangler kv namespace delete --namespace-id <id>`).
 
 ## Development
 
 ```sh
 npm test           # vitest
 npx tsc --noEmit   # type check
+npm run dev        # local server; put MCP_TOKEN=<64 hex chars> in .dev.vars
 ```
 
-Code lives in `src/`: `index.ts` (routing and auth), `server.ts` (MCP tools and instructions),
-`queries.ts` (reading the export), `memory.ts` (taste memory), `page.ts` (the personal page's HTML and
-CSS), `pageScript.ts` (its inline script), `posters.ts` (TMDB lookups, cached in KV), `ratings.ts`
-(OMDb scores, cached in KV), `exportZip.ts` / `dataset.ts` (parsing the export).
+## License and credits
 
-Poster images are provided by [TMDB](https://www.themoviedb.org). This product uses the TMDB API
+[MIT](LICENSE). Posters come from [TMDB](https://www.themoviedb.org); this product uses the TMDB API
 but is not endorsed or certified by TMDB. The display font is
-[Big Shoulders](https://github.com/xotypeco/big_shoulders) (SIL Open Font License, see `src/fonts/LICENSE`),
-bundled into the Worker and served under the secret path.
+[Big Shoulders](https://github.com/xotypeco/big_shoulders) (SIL Open Font License, `src/fonts/LICENSE`).

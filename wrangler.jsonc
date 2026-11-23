@@ -9,11 +9,7 @@
   "preview_urls": false,
   // The page's display font (src/fonts) is bundled into the Worker as binary data.
   "rules": [{ "type": "Data", "globs": ["**/*.woff2"], "fallthrough": true }],
-  "kv_namespaces": [
-    {
-      "binding": "LETTERBOXD",
-      // Created with `wrangler kv namespace create LETTERBOXD` on 2026-11-14.
-      "id": "4d65696bdb77416d9cb94023ea1299fa"
-    }
-  ]
+  // No namespace id on purpose: on the first deploy Wrangler creates the namespace (and may write
+  // its id here in your copy); later deploys keep using the one the deployed Worker already has.
+  "kv_namespaces": [{ "binding": "LETTERBOXD" }]
 }

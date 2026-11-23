@@ -8,11 +8,11 @@
 
 **Tech Stack:** TypeScript, Cloudflare Workers + KV, wrangler 4.x, `@modelcontextprotocol/sdk` 1.32 (`WebStandardStreamableHTTPServerTransport`, stateless, JSON responses), zod 4, vitest, fflate (ZIP reading in the upload script).
 
-**Spec:** `/home/datmomoagain/Code/letterboxd-mcp/DESIGN.md`
+**Spec:** `DESIGN.md` (in the project root at the time; no longer in the repo)
 
 ## Global Constraints
 
-- Project root: `/home/datmomoagain/Code/letterboxd-mcp`. Package manager: npm (Node 22 is installed; no global installs, no sudo).
+- Project root: the repo root. Package manager: npm (Node 22 is installed; no global installs, no sudo).
 - Read-only. No Letterboxd password, no requests to letterboxd.com, no RSS, no HTML scraping.
 - Data source = export CSVs only: `ratings.csv`, `watched.csv`, `watchlist.csv`, `diary.csv`, `reviews.csv`, `likes/films.csv`. From `profile.csv` read **only** the `Username` column. Ignore `comments.csv`, `deleted/`, `orphaned/`, `likes/lists.csv`, `likes/reviews.csv`.
 - Export headers (verified 2026-11-14):
@@ -22,7 +22,7 @@
   - reviews: `Date,Name,Year,Letterboxd URI,Rating,Rewatch,Review,Tags,Watched Date`
 - Access: the MCP endpoint is exactly `/mcp/<MCP_TOKEN>`, where `MCP_TOKEN` is a Worker secret of 64 hex chars. Everything else → `404` with an empty body. If `MCP_TOKEN` is unset or shorter than 32 chars → 404 for everything (fail closed).
 - KV binding `LETTERBOXD`, key `dataset`.
-- The token and full URL live in `/home/datmomoagain/Code/letterboxd-mcp/.connector-url` (gitignored, mode 600). Never print the token into committed files.
+- The token and full URL live in `.connector-url` in the project root (gitignored, mode 600). Never print the token into committed files.
 - No git commits unless the user asks. A `.gitignore` is still created (`node_modules`, `.wrangler`, `.connector-url`, `.dev.vars`, `dist`).
 - User notes go to `~/Desktop/notes/claude/letterboxd-mcp.md` (plain language: refresh, where the URL lives, how to undo).
 

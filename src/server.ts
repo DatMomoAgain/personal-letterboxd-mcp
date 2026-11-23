@@ -37,8 +37,7 @@ import { fetchOmdb, findFilm, IMDB_ID, type Ratings, type RatingsCache, recordLo
 import type { Dataset } from "./types.ts";
 
 export const NO_DATA_MESSAGE =
-  "No Letterboxd data has been uploaded yet. The user can upload their export ZIP on their personal page " +
-  '(or run "npm run upload -- <export zip>" in the project folder).';
+  "No Letterboxd data has been uploaded yet. The user can upload their export ZIP on their personal page.";
 
 /** Lets check_films answer from title records before any Letterboxd data is uploaded. */
 const EMPTY_DATASET: Dataset = { username: "", uploadedAt: "", ratings: [], watched: [], watchlist: [], diary: [], reviews: [], likedFilms: [] };

@@ -1,4 +1,4 @@
-// Runs in both Node (upload script) and the Worker (upload page).
+// Reads the export ZIP uploaded on the personal page.
 import { strFromU8, unzipSync } from "fflate";
 import type { ExportFiles } from "./types.ts";
 

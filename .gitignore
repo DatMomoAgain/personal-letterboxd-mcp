@@ -3,5 +3,6 @@ node_modules
 .connector-url
 .page-url
 .dev.vars
+.claude/settings.local.json
 dist
 .superpowers
