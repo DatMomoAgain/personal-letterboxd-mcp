@@ -1,5 +1,7 @@
 # personal-letterboxd-mcp
 
+[![DatMomoAgain/personal-letterboxd-mcp MCP server](https://glama.ai/mcp/servers/DatMomoAgain/personal-letterboxd-mcp/badges/score.svg)](https://glama.ai/mcp/servers/DatMomoAgain/personal-letterboxd-mcp)
+
 A personal [MCP](https://modelcontextprotocol.io) server that gives Claude (claude.ai, the apps and
 Claude Code) your Letterboxd history and a taste memory it keeps for you, so recommendations are based
 on what you've watched and what you wrote about it. It reads Letterboxd's official data export: no
