@@ -139,7 +139,7 @@ const noteFields = {
   examples: z
     .array(
       z.object({
-        title: z.string().trim().min(1).max(300),
+        title: z.string().trim().min(1).max(300).describe("Film or series title"),
         year: year.optional().describe("Release year"),
         imdbId: z
           .string()
@@ -222,10 +222,11 @@ export function buildServer(data: Dataset | null, memory: MemoryStore, services:
     {
       title: "Taste memory",
       description:
-        "Call this FIRST. Everything the user has told you about their film taste in earlier chats (notes with ids), " +
-        "your last written overview of their taste, and their watch list (the 'watch next' films they chose to watch " +
-        "and haven't watched yet). Films they've watched from the list show up as pickedBecause in check_films and " +
-        "get_watched instead. Per-title records (don't-recommend reasons, Claude notes) aren't here: check_films has them.",
+        "Call this FIRST. Returns: what the user has told you about their film taste in earlier chats (taste notes, " +
+        "each with an id for update_note and forget), your last written overview of their taste, and their 'watch next' " +
+        "list (films they chose to watch and haven't watched yet). Not here: picks they've since watched (check_films " +
+        "and get_watched show those as pickedBecause) and per-title records (don't-recommend reasons and Claude notes, " +
+        "in check_films).",
       inputSchema: {},
       annotations: readOnly,
     },
@@ -249,7 +250,8 @@ export function buildServer(data: Dataset | null, memory: MemoryStore, services:
         "Save one theme of the user's film taste, e.g. why they rated one film above another. When they explain a " +
         "preference or answer a question about their taste, propose the note in the chat and call this only once " +
         "they agree. Before proposing, check their history for films that contradict it; one film's review is not a " +
-        "general rule. Returns the note with its id.",
+        "general rule. If it belongs to an existing note's theme, extend that note with update_note instead; something " +
+        "about a single title goes in save_title_note. Returns the note with its id.",
       inputSchema: { note: noteText, ...noteFields },
       annotations: writes,
     },
@@ -270,11 +272,11 @@ export function buildServer(data: Dataset | null, memory: MemoryStore, services:
         "Before proposing a change, check their history for films that contradict it; one film's review is not a " +
         "general rule. Only after the user confirms the change.",
       inputSchema: {
-        id: z.string().min(1),
+        id: z.string().min(1).describe("The note's id, from get_memory"),
         note: noteText.optional(),
-        title: noteFields.title.nullable(),
-        topic: noteFields.topic.nullable(),
-        examples: noteFields.examples.nullable(),
+        title: noteFields.title.nullable().describe("New headline for the theme; null to clear it"),
+        topic: noteFields.topic.nullable().describe(`New section on the user's page (${Object.keys(TOPICS).join(", ")}); null to clear it`),
+        examples: noteFields.examples.nullable().describe("The full new list of example films (replaces the old one); null to clear it"),
       },
       annotations: { ...writes, idempotentHint: true },
     },
@@ -290,8 +292,10 @@ export function buildServer(data: Dataset | null, memory: MemoryStore, services:
     "forget",
     {
       title: "Forget a taste note",
-      description: "Delete a saved note (by id from get_memory) that is wrong or no longer true. Only after the user confirms.",
-      inputSchema: { id: z.string().min(1) },
+      description:
+        "Delete a saved note (by id from get_memory) that is wrong or no longer true. Only after the user confirms. " +
+        "To correct or refine a note instead, use update_note.",
+      inputSchema: { id: z.string().min(1).describe("The note's id, from get_memory") },
       annotations: { ...writes, destructiveHint: true, idempotentHint: true },
     },
     async ({ id }) => {
@@ -310,7 +314,7 @@ export function buildServer(data: Dataset | null, memory: MemoryStore, services:
         "Replace the written overview of the user's film taste shown on their personal page. " +
         "Write it to them in second person, a few short paragraphs, grounded in their ratings, reviews and notes. " +
         "Only after the user agrees to the rewrite.",
-      inputSchema: { text: z.string().trim().min(1).max(6000) },
+      inputSchema: { text: z.string().trim().min(1).max(6000).describe("The whole new overview; it replaces the old one") },
       annotations: { ...writes, idempotentHint: true },
     },
     async ({ text }) => {
@@ -333,13 +337,14 @@ export function buildServer(data: Dataset | null, memory: MemoryStore, services:
         films: z
           .array(
             z.object({
-              title: z.string().trim().min(1).max(300),
+              title: z.string().trim().min(1).max(300).describe("Film or series title"),
               year: year.optional().describe("Release year"),
               type: z.enum(["film", "series"]).optional().describe("Only match this kind, e.g. the film, not the same-named series"),
             }),
           )
           .min(1)
-          .max(MAX_FIND_TITLES),
+          .max(MAX_FIND_TITLES)
+          .describe("The titles to look up"),
       },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
@@ -400,7 +405,8 @@ export function buildServer(data: Dataset | null, memory: MemoryStore, services:
             }),
           )
           .min(1)
-          .max(20),
+          .max(20)
+          .describe("Only the new picks, in the order they should appear"),
       },
       annotations: { ...writes, idempotentHint: true },
     },
@@ -453,7 +459,7 @@ export function buildServer(data: Dataset | null, memory: MemoryStore, services:
         "Only the fields you pass change, and it keeps its place on the list. To swap in a different film, " +
         "remove this one with remove_picks and save the other with save_picks. Only after the user confirms.",
       inputSchema: {
-        imdbId: pickId,
+        imdbId: pickId.describe("The pick's IMDb id, from get_memory"),
         why: pickWhy.optional(),
         title: z.string().trim().min(1).max(300).optional().describe("Title as on Letterboxd"),
         year: year.optional().describe("Release year"),
@@ -476,7 +482,7 @@ export function buildServer(data: Dataset | null, memory: MemoryStore, services:
       description:
         "Take films off the 'watch next' list (by IMDb id, from get_memory): ones the user isn't interested in, " +
         "has ruled out, or that were saved under the wrong id. Only after the user confirms.",
-      inputSchema: { imdbIds: z.array(pickId).min(1).max(20) },
+      inputSchema: { imdbIds: z.array(pickId).min(1).max(20).describe("IMDb ids of the picks to remove, from get_memory") },
       annotations: { ...writes, destructiveHint: true, idempotentHint: true },
     },
     async ({ imdbIds }) => {
@@ -531,7 +537,8 @@ export function buildServer(data: Dataset | null, memory: MemoryStore, services:
             }),
           )
           .min(1)
-          .max(20),
+          .max(20)
+          .describe("One entry per title"),
       },
       annotations: { ...writes, idempotentHint: true },
     },
@@ -638,7 +645,8 @@ export function buildServer(data: Dataset | null, memory: MemoryStore, services:
             }),
           )
           .min(1)
-          .max(MAX_SEEN_TITLES),
+          .max(MAX_SEEN_TITLES)
+          .describe("Every title to check, in one call"),
       },
       annotations: readOnly,
     },
@@ -682,13 +690,16 @@ export function buildServer(data: Dataset | null, memory: MemoryStore, services:
         "films with a Claude note are marked hasClaudeNote (check_films has the text).",
       inputSchema: {
         rated: z.boolean().optional().describe("true: only rated films; false: only unrated ones"),
-        minRating: rating.optional(),
-        maxRating: rating.optional(),
+        minRating: rating.optional().describe("Lowest star rating to include (0.5 to 5)"),
+        maxRating: rating.optional().describe("Highest star rating to include (0.5 to 5)"),
         yearFrom: year.optional().describe("Earliest release year"),
         yearTo: year.optional().describe("Latest release year"),
         watchedFrom: day.optional().describe("Only films watched on or after this day"),
         watchedTo: day.optional().describe("Only films watched on or before this day"),
-        sort: z.enum(["date_desc", "date_asc", "rating_desc", "rating_asc", "year_desc", "year_asc", "title"]).optional(),
+        sort: z
+          .enum(["date_desc", "date_asc", "rating_desc", "rating_asc", "year_desc", "year_asc", "title"])
+          .optional()
+          .describe("By watch date (default date_desc), star rating, release year or title"),
         ...paging,
       },
       annotations: readOnly,
@@ -710,8 +721,11 @@ export function buildServer(data: Dataset | null, memory: MemoryStore, services:
   server.registerTool(
     "get_watchlist",
     {
-      title: "Watchlist",
-      description: "Films the user wants to watch, most recently added first.",
+      title: "Letterboxd watchlist",
+      description:
+        "Their Letterboxd watchlist from the export (as of the last upload), most recently added first: title, year, " +
+        "date added. This is their old Letterboxd list; the films they've chosen to watch next are in get_memory. " +
+        "To check specific films, use check_films.",
       inputSchema: { ...paging },
       annotations: readOnly,
     },
@@ -726,8 +740,8 @@ export function buildServer(data: Dataset | null, memory: MemoryStore, services:
         "The user's written reviews, newest first: their own words on what worked and what didn't. Filter by title (forgiving, like check_films) or star rating, e.g. maxRating 2.5 to see what they dislike and why.",
       inputSchema: {
         title: z.string().min(1).optional().describe("Film title"),
-        minRating: rating.optional(),
-        maxRating: rating.optional(),
+        minRating: rating.optional().describe("Lowest star rating to include (0.5 to 5)"),
+        maxRating: rating.optional().describe("Highest star rating to include (0.5 to 5)"),
         ...paging,
       },
       annotations: readOnly,
