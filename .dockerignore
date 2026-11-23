@@ -1,0 +1,11 @@
+node_modules
+.wrangler
+.git
+.connector-url
+.page-url
+.dev.vars
+.env
+.claude
+.superpowers
+docs
+tests

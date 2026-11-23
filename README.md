@@ -41,7 +41,8 @@ If Claude reads too much into something, "that was just about that film" correct
 
 ## Run your own copy
 
-Each person runs their own copy on their own free Cloudflare account. In Claude Code, open this folder
+Each person runs their own copy on their own free Cloudflare account, or in a container (see
+"Without Cloudflare" below). In Claude Code, open this folder
 and ask it to set this up: the [setup skill](.claude/skills/setup/SKILL.md) walks you through it.
 
 You need Node 22+, a free [Cloudflare](https://dash.cloudflare.com/sign-up) account and your Letterboxd
@@ -73,6 +74,19 @@ Then:
 - Leaked link: `npm run setup -- --new-token`. The old links stop working.
 - Remove: delete the connector, then `npx wrangler delete`. Your data stays in a KV namespace until you
   delete that too (`npx wrangler kv namespace list`, then `npx wrangler kv namespace delete --namespace-id <id>`).
+
+**Without Cloudflare:** the [Dockerfile](Dockerfile) runs the same server in Docker or Podman, on
+Cloudflare's open-source runtime, with your data in a volume. Put `MCP_TOKEN=` and the output of
+`openssl rand -hex 32` in `.dev.vars` (optionally `TMDB_TOKEN=` and `OMDB_KEY=` lines too), then:
+
+```sh
+docker build -t letterboxd-mcp .
+docker run -d -p 8787:8787 -v letterboxd-data:/data --env-file .dev.vars letterboxd-mcp
+```
+
+Your links are `<address>/mcp/<token>` and `<address>/home/<token>`. Claude Code can use
+`http://127.0.0.1:8787` directly; claude.ai needs a public HTTPS address, such as a tunnel or a
+reverse proxy in front of the container.
 
 ## Development
 

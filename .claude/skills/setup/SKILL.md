@@ -1,6 +1,6 @@
 ---
 name: setup
-description: Walk the user through running their own copy of this Letterboxd MCP server on Cloudflare (login, `npm run setup`, uploading their export, connecting Claude, optional poster and score keys). Use when someone wants to set up or deploy this project, or when `npm run setup` fails.
+description: Walk the user through running their own copy of this Letterboxd MCP server on Cloudflare or in a container (login, `npm run setup`, uploading their export, connecting Claude, optional poster and score keys). Use when someone wants to set up or deploy this project, or when `npm run setup` fails.
 ---
 
 # Set up your own copy
@@ -16,6 +16,10 @@ The token (inside `.connector-url` and `.page-url`) and the TMDB / OMDb keys are
 - `npm run setup` never prints the token, so you can run it yourself and read its output.
 
 ## Steps
+
+These steps use Cloudflare. If they'd rather run it in a container, follow the README's "Without
+Cloudflare" instead: they write `.dev.vars` in their own terminal (it holds the token), and the
+links are their address plus `/mcp/<token>` and `/home/<token>`. Then continue from step 3.
 
 1. **Prerequisites.** Check `node --version` (22 or newer) and run `npm install`. If they have no Cloudflare account, send them to https://dash.cloudflare.com/sign-up (free plan). Done when Node is 22+, `npm install` succeeded, and they have an account.
 
